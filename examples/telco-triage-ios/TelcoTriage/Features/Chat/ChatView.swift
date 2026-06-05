@@ -15,6 +15,22 @@ struct ChatView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                // Always-visible RAG load-status chip. Renders nothing
+                // for customers when the stack is live; surfaces a
+                // tap-to-diagnose amber chip whenever ColBERT failed
+                // to load at boot (so the operator immediately sees
+                // why "How do I change my password" returns the
+                // unknown-feature fallback instead of a real answer).
+                RAGStatusChip(
+                    status: appState.ragStatus,
+                    isEngineeringMode: appMode == .engineering
+                )
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+                .padding(.bottom, 2)
+                if appMode == .customer {
+                    customerStatusHeader
+                }
                 messageList
                 if shouldShowStarters {
                     starterChips
@@ -142,25 +158,81 @@ struct ChatView: View {
         return onlyWelcome && vm.inputText.isEmpty && !vm.isProcessing
     }
 
-    /// Wrapped grid of starter prompts — each one maps to a distinct
-    /// edge-AI primitive proven by the fine-tuned adapters. Tapping
-    /// sends the prompt through the normal pipeline.
+    private var customerStatusHeader: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "iphone")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(brand.textPrimary)
+                .frame(width: 34, height: 34)
+                .background(brand.textPrimary.opacity(0.06), in: Circle())
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Home internet support")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(brand.textPrimary)
+                Text("On-device support by Liquid AI")
+                    .font(.caption2)
+                    .foregroundStyle(brand.textSecondary)
+            }
+
+            Spacer()
+
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(brand.success)
+                    .frame(width: 6, height: 6)
+                Text("Ready")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+            }
+            .foregroundStyle(brand.textSecondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(brand.textPrimary.opacity(0.04), in: Capsule())
+        }
+        .padding(12)
+        .background(brand.surfaceElevated, in: RoundedRectangle(cornerRadius: brand.cardCornerRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: brand.cardCornerRadius)
+                .stroke(brand.border, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.04), radius: 10, y: 4)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 2)
+    }
+
+    /// Starter actions stay on the proven prompts but render as polished
+    /// customer-facing nudges instead of raw query text.
     private var starterChips: some View {
-        VStack(spacing: 8) {
-            Text("Try asking")
-                .font(.caption)
-                .foregroundStyle(brand.textSecondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Start with")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(brand.textPrimary)
+                Spacer()
+                Text("On-device")
+                    .font(.caption2)
+                    .foregroundStyle(brand.textSecondary)
+            }
 
             WrappingChipGrid(starters: appMode == .customer ? ConversationStarter.customer : ConversationStarter.all) { starter in
                 guard let vm = holder.vm else { return }
                 vm.inputText = starter.prompt
                 vm.send()
             }
-            .padding(.horizontal, 16)
         }
-        .padding(.bottom, 8)
+        .padding(12)
+        .background(brand.surfaceElevated, in: RoundedRectangle(cornerRadius: brand.cardCornerRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: brand.cardCornerRadius)
+                .stroke(brand.border, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.035), radius: 8, y: 3)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 10)
     }
 
     // MARK: - Subviews
@@ -168,7 +240,7 @@ struct ChatView: View {
     private var messageList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 16) {
+                LazyVStack(spacing: 14) {
                     ForEach(holder.vm?.messages ?? []) { message in
                         ChatMessageRow(
                             message: message,
@@ -197,7 +269,8 @@ struct ChatView: View {
                         }
                     }
                 }
-                .padding(.vertical, 16)
+                .padding(.top, appMode == .customer ? 10 : 16)
+                .padding(.bottom, 16)
             }
             .scrollDismissesKeyboard(.interactively)
             .onTapGesture {
@@ -218,14 +291,9 @@ struct ChatView: View {
             isProcessing: holder.vm?.isProcessing ?? false,
             attachedImage: holder.vm?.attachedImage,
             isListening: appState.voice.isListening,
-            isTranscribing: appState.voice.isTranscribing,
             listeningPartial: {
-                switch appState.voice.state {
-                case .listening(let partial), .transcribing(let partial):
-                    return partial
-                default:
-                    return ""
-                }
+                if case .listening(let partial) = appState.voice.state { return partial }
+                return ""
             }(),
             voiceError: {
                 if case .error(let msg) = appState.voice.state { return msg }
@@ -233,7 +301,6 @@ struct ChatView: View {
             }(),
             onSend: { holder.vm?.send() },
             onMicTap: {
-                guard !appState.voice.isTranscribing else { return }
                 if appState.voice.isListening {
                     Task { await appState.voice.stop() }
                 } else {
@@ -241,7 +308,7 @@ struct ChatView: View {
                     // user isn't greeted by a stale "permission denied"
                     // strip after they fix the setting.
                     appState.voice.reset()
-                    appState.voice.start(localRuntimeBusy: (holder.vm?.isProcessing ?? false) || appState.isModelWarming)
+                    appState.voice.start()
                 }
             },
             onCameraTap: { showingPhotoPicker = true },
@@ -259,7 +326,6 @@ final class ChatViewModelHolder: ObservableObject {
     func bootstrap(from appState: AppState) {
         guard vm == nil else { return }
         let newVM = ChatViewModel(
-            decisionEngine: appState.decisionEngine,
             chatModeRouter: appState.chatModeRouter,
             kbExtractor: appState.kbExtractor,
             provider: appState.modelProvider,
@@ -273,6 +339,15 @@ final class ChatViewModelHolder: ObservableObject {
             nbaEngine: appState.nbaEngine,
             toolSelector: appState.toolSelector,
             toolExecutor: appState.toolExecutor,
+            verizonDispatcher: appState.verizonDispatcher,
+            // ADR-022 §4.3 Layer 1 — the unified understanding classifier
+            // produces the QueryUnderstanding vector used for routing,
+            // NBA selection, and the engineering trace card.
+            understandingClassifier: appState.queryUnderstandingClassifier,
+            // ADR-024 Phase δ — generative turn-relationship classifier.
+            // Non-nil when telco-relational-v1.gguf is bundled; otherwise
+            // UnavailableRelationalStrategy (silently returns .none).
+            relationalStrategy: appState.relationalStrategy,
             welcomeGreetingProvider: { [weak appState] in
                 guard let appState else { return "" }
                 let firstName = appState.customerContext.profile.firstName
@@ -312,29 +387,37 @@ private struct WrappingChipGrid: View {
 
     @Environment(\.brand) private var brand
 
-    private var rows: [[ConversationStarter]] {
-        let mid = (starters.count + 1) / 2
-        return [Array(starters.prefix(mid)), Array(starters.dropFirst(mid))]
-    }
+    private let columns = [
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8),
+    ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                HStack(spacing: 8) {
-                    ForEach(row) { starter in
-                        Button { onSelect(starter) } label: {
-                            Text(starter.prompt)
-                                .font(.caption)
-                                .foregroundStyle(brand.textSecondary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(brand.surfaceElevated, in: Capsule())
-                                .overlay(Capsule().stroke(brand.border, lineWidth: 1))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityHint("Sends this as a message")
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+            ForEach(starters) { starter in
+                Button { onSelect(starter) } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: starter.icon)
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 16)
+                        Text(starter.label)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.82)
                     }
+                    .foregroundStyle(brand.textPrimary)
+                    .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .background(brand.textPrimary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(brand.border, lineWidth: 1)
+                    )
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel(starter.label)
+                .accessibilityHint("Sends this as a message")
             }
         }
     }

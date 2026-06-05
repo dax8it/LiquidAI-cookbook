@@ -128,12 +128,13 @@ public actor LlamaBackend {
         temperature: Float = 0.0,
         stopSequences: [String] = [],
         clearCache: Bool = true,
-        outputMode: GenerationParams.OutputMode = .text
+        outputMode: GenerationParams.OutputMode = .text,
+        grammar: String? = nil
     ) throws -> (text: String, tokenCount: Int, timing: GenerationTiming) {
         #if LLAMA_CPP_AVAILABLE
         guard let context, let model else { throw LFMEngineError.modelNotLoaded }
 
-        applySampler(temperature: temperature)
+        applySampler(temperature: temperature, grammar: grammar)
 
         let tokens = tokenize(prompt, addBos: true)
         guard !tokens.isEmpty else {

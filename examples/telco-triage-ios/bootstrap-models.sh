@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
 #
-# Copy local Telco Triage GGUF model artifacts into the Xcode target.
+# Copy the current-runtime Telco Triage GGUF artifacts into the Xcode target.
 #
-# The cookbook keeps large GGUF files out of git. Put the files in either:
+# The cookbook keeps large GGUF files out of git. Put the files in:
 #
 #   ./models/telco/
 #
-# or set TELCO_MODELS_DIR to another directory before running this script.
+# or set TELCO_MODELS_DIR before running:
 #
-# Usage:
-#
-#   cd examples/telco-triage-ios
 #   TELCO_MODELS_DIR=/path/to/telco-models ./bootstrap-models.sh
-#   xcodegen generate
 #
 set -euo pipefail
 
@@ -21,48 +17,29 @@ SRC="${TELCO_MODELS_DIR:-$SCRIPT_DIR/models/telco}"
 DST="$SCRIPT_DIR/TelcoTriage/Resources/Models"
 
 REQUIRED=(
-  # CRITICAL: use the LFM2.5-350M Base GGUF. The LoRA adapters below were
-  # trained against Base weights, not DPO/instruct weights.
   "lfm25-350m-base-Q4_K_M.gguf"
-
-  # ADR-015 shared classifier adapter. The nine classifier head triplets are
-  # small and committed under TelcoTriage/Resources/.
-  "telco-shared-clf-v1.gguf"
-
-  # Generative adapters used for grounded answer and tool-argument paths.
   "telco-tool-selector-v3.gguf"
-  "chat-mode-router-v2.gguf"
-  "kb-extractor-v1.gguf"
-)
-
-OPTIONAL=(
-  # Transitional classifier adapters. The app prefers telco-shared-clf-v1,
-  # but these can be bundled for experiments with the older paired-head path.
-  "chat-mode-clf-v1.gguf"
-  "kb-extract-clf-v1.gguf"
-  "tool-selector-clf-v1.gguf"
 )
 
 if [[ ! -d "$SRC" ]]; then
   echo "error: model directory not found: $SRC" >&2
   echo "" >&2
-  echo "Create $SCRIPT_DIR/models/telco or set TELCO_MODELS_DIR." >&2
-  echo "Required files:" >&2
-  for name in "${REQUIRED[@]}"; do
-    echo "  - $name" >&2
-  done
+  echo "Download the private model pack or set TELCO_MODELS_DIR." >&2
+  echo "Example:" >&2
+  echo "  hf auth login" >&2
+  echo "  hf download \"\$HF_REPO_ID\" --include '*.gguf' --local-dir \"$SCRIPT_DIR/models/telco\"" >&2
   exit 1
 fi
 
 mkdir -p "$DST"
 
-# Prune stale GGUFs from prior runs so a local demo build does not silently
-# bundle retired adapters.
-shopt -s nullglob
-for existing in "$DST"/*.gguf; do
+# Keep the local app bundle aligned with the current runtime contract. Stale
+# GGUFs can make the IPA larger and make traces look like old adapters are part
+# of the online path.
+while IFS= read -r existing; do
   base="$(basename "$existing")"
   keep=false
-  for name in "${REQUIRED[@]}" "${OPTIONAL[@]}"; do
+  for name in "${REQUIRED[@]}"; do
     if [[ "$base" == "$name" ]]; then
       keep=true
       break
@@ -72,8 +49,8 @@ for existing in "$DST"/*.gguf; do
     rm -f "$existing"
     echo "pruned stale $base"
   fi
-done
-shopt -u nullglob
+done < <(find "$DST" -type f -name '*.gguf' 2>/dev/null | sort)
+find "$DST" -type d -empty -delete 2>/dev/null || true
 
 for name in "${REQUIRED[@]}"; do
   if [[ ! -f "$SRC/$name" ]]; then
@@ -83,14 +60,6 @@ for name in "${REQUIRED[@]}"; do
   cp "$SRC/$name" "$DST/$name"
   size_mb="$(du -m "$DST/$name" | cut -f1)"
   echo "copied $name (${size_mb} MB)"
-done
-
-for name in "${OPTIONAL[@]}"; do
-  if [[ -f "$SRC/$name" ]]; then
-    cp "$SRC/$name" "$DST/$name"
-    size_mb="$(du -m "$DST/$name" | cut -f1)"
-    echo "copied optional $name (${size_mb} MB)"
-  fi
 done
 
 echo ""

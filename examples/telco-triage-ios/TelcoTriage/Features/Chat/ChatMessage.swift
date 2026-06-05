@@ -98,7 +98,6 @@ public struct CallTrace: Equatable {
         case tool             // LFM2.5-350M emits a tool call, tool runs locally
         case visionPack       // LFM2.5-VL-450M (or heuristic if pack absent)
         case voicePack        // LFM2.5-Audio-1.5B (or Apple Speech fallback)
-        case cloudAssist      // Redacted cloud-assist payload prepared locally
 
         public var modelLabel: String {
             switch self {
@@ -106,7 +105,6 @@ public struct CallTrace: Equatable {
             case .tool: return "LFM2.5-350M + Tool"
             case .visionPack: return "LFM2.5-VL-450M"
             case .voicePack: return "LFM2.5-Audio-1.5B"
-            case .cloudAssist: return "LFM2.5-350M"
             }
         }
 
@@ -116,7 +114,6 @@ public struct CallTrace: Equatable {
             case .tool: return "Tool call"
             case .visionPack: return "Vision pack"
             case .voicePack: return "Voice pack"
-            case .cloudAssist: return "Cloud assist"
             }
         }
     }
@@ -139,10 +136,26 @@ public struct CallTrace: Equatable {
     public let extraction: ExtractionResult?
     public let toolSelectionReasoning: String?
     public let toolSelectionConfidence: Double?
-    /// Captured 9-head ADR-015 vector + computed lane decision for the
-    /// engineering-mode pipeline trace UI. `nil` when the multi-head
-    /// stack isn't loaded or this turn used a non-decision-engine path.
-    public let telcoPipeline: TelcoPipelineTrace?
+    /// ADR-022 §4.3 Layer 1 — the full 5-head understanding vector
+    /// produced by `QueryUnderstandingClassifier`. Renders into the
+    /// `UnderstandingTraceCard` when present. Nil for legacy paths
+    /// (audio cockpit demos, vision, etc.) that don't run the v2
+    /// understanding layer.
+    public let understanding: QueryUnderstanding?
+
+    // -- Step 6.6 composer telemetry --
+    //
+    // Surgical four-field set per the Step 6 plan §5. Populated by
+    // `ChatViewModel.runVerizonDispatch` from the dispatcher's
+    // `VerizonDispatchResult`. Nil for non-Verizon paths (banking
+    // POC pipeline, vision, voice) and for legacy Stage B turns.
+    public let routePolicyMS: Int?
+    public let composerMS: Int?
+    public let totalWallMS: Int?
+    public let composerRoute: String?
+    public let composerCitedPageID: String?
+    public let composerRenderedLinkID: String?
+    public let composerConfirmationShown: Bool?
 
     public init(
         surface: Surface,
@@ -159,7 +172,14 @@ public struct CallTrace: Equatable {
         extraction: ExtractionResult? = nil,
         toolSelectionReasoning: String? = nil,
         toolSelectionConfidence: Double? = nil,
-        telcoPipeline: TelcoPipelineTrace? = nil
+        understanding: QueryUnderstanding? = nil,
+        routePolicyMS: Int? = nil,
+        composerMS: Int? = nil,
+        totalWallMS: Int? = nil,
+        composerRoute: String? = nil,
+        composerCitedPageID: String? = nil,
+        composerRenderedLinkID: String? = nil,
+        composerConfirmationShown: Bool? = nil
     ) {
         self.surface = surface
         self.retrievalMS = retrievalMS
@@ -175,19 +195,23 @@ public struct CallTrace: Equatable {
         self.extraction = extraction
         self.toolSelectionReasoning = toolSelectionReasoning
         self.toolSelectionConfidence = toolSelectionConfidence
-        self.telcoPipeline = telcoPipeline
+        self.understanding = understanding
+        self.routePolicyMS = routePolicyMS
+        self.composerMS = composerMS
+        self.totalWallMS = totalWallMS
+        self.composerRoute = composerRoute
+        self.composerCitedPageID = composerCitedPageID
+        self.composerRenderedLinkID = composerRenderedLinkID
+        self.composerConfirmationShown = composerConfirmationShown
     }
 
-    public var totalMS: Int { (retrievalMS ?? 0) + inferenceMS }
+    public var totalMS: Int { totalWallMS ?? ((retrievalMS ?? 0) + inferenceMS) }
 
     public var customerVisibleMS: Int {
-        if let telcoPipeline {
-            return Int(telcoPipeline.totalLatencyMs.rounded())
-        }
         switch surface {
         case .onDeviceRAG:
-            return (chatModeRuntimeMS ?? 0) + (retrievalMS ?? 0) + inferenceMS
-        case .tool, .visionPack, .voicePack, .cloudAssist:
+            return totalWallMS ?? ((chatModeRuntimeMS ?? 0) + (retrievalMS ?? 0) + inferenceMS)
+        case .tool, .visionPack, .voicePack:
             return totalMS
         }
     }
@@ -216,6 +240,20 @@ public struct RoutingSummary: Equatable {
 /// What the on-device model understood about the user's request. Replaces
 /// the fake-execution flow — the demo value is proving the model picked the
 /// right tool with the right arguments, not pretending to restart a router.
+///
+/// `isCompoundAttachment` distinguishes two visual modes per the
+/// ADR-022 compound-response review (2026-05-26):
+///   - false (default) — this is the PRIMARY response. The chat bubble
+///     above the card carries the short framing ("I'll restart your
+///     router."). The card itself reads "Tool selected" — implied
+///     primary CTA.
+///   - true            — this is a SECONDARY affordance attached to a
+///     RAG / unknown-feature / clarification reply whose primary
+///     content is a how-to article. The card renders "Want me to do
+///     this for you?" above the tool header so the user reads it as
+///     a one-tap alternative to following the article themselves.
+///
+/// Pure visual signal. Confirm/Decline plumbing is identical either way.
 public struct ToolDecision: Equatable {
     public let intent: ToolIntent
     public let toolID: String
@@ -227,6 +265,33 @@ public struct ToolDecision: Equatable {
     public let reasoning: String?
     public let requiresConfirmation: Bool
     public let isDestructive: Bool
+    public var isCompoundAttachment: Bool
+
+    public init(
+        intent: ToolIntent,
+        toolID: String,
+        displayName: String,
+        icon: String,
+        description: String,
+        arguments: [ToolDecisionArgument],
+        confidence: Double,
+        reasoning: String?,
+        requiresConfirmation: Bool,
+        isDestructive: Bool,
+        isCompoundAttachment: Bool = false
+    ) {
+        self.intent = intent
+        self.toolID = toolID
+        self.displayName = displayName
+        self.icon = icon
+        self.description = description
+        self.arguments = arguments
+        self.confidence = confidence
+        self.reasoning = reasoning
+        self.requiresConfirmation = requiresConfirmation
+        self.isDestructive = isDestructive
+        self.isCompoundAttachment = isCompoundAttachment
+    }
 }
 
 /// A single extracted argument, formatted for display.

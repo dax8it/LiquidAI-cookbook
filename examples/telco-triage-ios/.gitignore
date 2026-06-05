@@ -3,6 +3,7 @@ TelcoTriage.xcodeproj/
 
 # Local model artifacts. The cookbook repository keeps GGUFs out of git.
 models/
+.hf-bundle/
 TelcoTriage/Resources/Models/*.gguf
 TelcoTriage/Resources/Models/**/*.gguf
 

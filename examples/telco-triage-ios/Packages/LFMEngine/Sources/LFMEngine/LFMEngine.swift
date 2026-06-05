@@ -5,7 +5,7 @@ import os.log
 ///
 /// Supports two modes:
 /// - `.onDevice`: Direct llama.cpp inference via Metal (production)
-/// - `.proxy`: HTTP calls to a remote inference backend (rapid iteration)
+/// - `.proxy`: HTTP calls to H100 backend (rapid iteration)
 ///
 /// The engine is mode-agnostic to callers — `generate()` returns the same
 /// `InferenceResult` regardless of mode.

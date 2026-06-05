@@ -137,12 +137,25 @@ public struct KeywordKBExtractor: KBExtractor {
     /// for "how do I restart my router" (3 stopword hits to 2 real).
     private static func contentTokens(text: String) -> Set<String> {
         var out: Set<String> = []
-        for tok in TelcoTopicGate.tokenize(text) {
+        for tok in Self.tokenize(text) {
             if tok.count < 2 { continue }
             if Self.stopwords.contains(tok) { continue }
             out.insert(tok)
         }
         return out
+    }
+
+    /// Lowercase + split on non-alphanumeric boundaries. Inlined from
+    /// the deleted `TelcoTopicGate` (which was a keyword pre-filter
+    /// that short-circuited "Hi" → OOS before any classifier ran).
+    /// The tokenizer itself is generic and stays here so the KB
+    /// extractor's content-token logic doesn't depend on a deleted
+    /// type's lifecycle.
+    static func tokenize(_ text: String) -> [String] {
+        text
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
     }
 
     /// Per-entry content token set: topic + aliases + tags + the

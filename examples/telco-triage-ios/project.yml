@@ -32,7 +32,6 @@ settings:
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "21"
     CODE_SIGN_STYLE: Automatic
-    SWIFT_OBJC_BRIDGING_HEADER: TelcoTriage/Core/Voice/AudioTapInstallerBridge.h
     # LeapSDK's simulator dylibs are built with an iOS 18.5 simulator
     # deployment target. Keep physical devices on iOS 17.0, but avoid
     # simulator linker mismatches in Xcode by raising only simulator builds.
@@ -91,7 +90,19 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources:
-      - TelcoTriageTests
+      # Customer-facing cookbook tests: keep the suite focused on the
+      # architecture that actually ships in this example. The source app
+      # still contains some disabled research scaffolding for historical
+      # comparison, but the cookbook validation contract is composer-only
+      # RAG + policy routing + multi-turn state.
+      - TelcoTriageTests/AnswerComposerTests.swift
+      - TelcoTriageTests/BM25HierarchyRetrieverSwiftParityTests.swift
+      - TelcoTriageTests/MultiTurnHeuristicsTests.swift
+      - TelcoTriageTests/MultiTurnIntegrationTests.swift
+      - TelcoTriageTests/VerizonDispatcherComposerPathTests.swift
+      - TelcoTriageTests/Fixtures/ScriptedBackend.swift
+      - TelcoTriageTests/Fixtures/TestChatHarness.swift
+      - TelcoTriageTests/Fixtures/retriever_parity_v1.json
     dependencies:
       - target: TelcoTriage
     settings:

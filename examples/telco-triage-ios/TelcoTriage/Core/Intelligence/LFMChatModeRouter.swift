@@ -1,20 +1,22 @@
 import Foundation
 
-/// Production `ChatModeRouter` backed by LFM2.5-350M plus the
-/// `chat-mode-router-v2` LoRA adapter.
+/// Production `ChatModeRouter` backed by an LFM2.5-350M prompt over
+/// the base model — no LoRA adapter, no training data, no fine-tune.
+/// If validation shows the base model is not discriminative enough
+/// across the 4 modes, upgrade to a small dedicated LoRA (~1,500
+/// examples of query → mode pairs) without changing the protocol.
 ///
-/// This adapter is trained on the user-intent boundary that caused the
-/// original telco demo failures: how/why support questions should go to
-/// local RAG, while imperative requests should go to the tool selector.
-/// Examples from the parent eval set include "why is my wifi slow" and
-/// "how do I restart my router" as `kb_question`, while "restart my
-/// router" and "run diagnostics on my home network" stay `tool_action`.
+/// Why base model first:
+///   1. No training data to generate, no H100 time to spend.
+///   2. A 4-way classification over short queries is within the
+///      competence envelope of a decently-prompted 350M model.
+///   3. If we end up needing a fine-tune, validation lets us size
+///      the dataset from measured confusion pairs — not guesses.
 ///
 /// Inference dispatches through `AdapterInferenceBackend` so the
 /// router works identically against on-device llama.cpp, a sidecar
-/// backend, or any future transport. `adapterPath: ""` is reserved for
-/// degraded tests or missing-artifact mode; production bundles pass the
-/// trained adapter path.
+/// backend, or any future transport. `adapterPath: ""` signals "use
+/// the loaded base model, do not apply a LoRA."
 ///
 /// Errors are caught and surfaced as `.outOfScope` with confidence
 /// 0.0 — a fail-safe default that keeps the chat flow alive even when
@@ -42,6 +44,12 @@ public struct LFMChatModeRouter: ChatModeRouter {
     }
 
     public func classify(query: String) async -> ChatModePrediction {
+        // ADR-024 — single-turn only. ADR-023 Phase 1's history-aware
+        // overload was retired after device testing proved that
+        // prompt-stuffing amplified parse failures on the 350M base.
+        // Multi-turn signal now flows through the pairwise relational
+        // heads on cached hidden states (see ADR-024 §4.5), NOT
+        // through the chat_mode prompt.
         let start = Date()
         let prompt = Self.buildPrompt(query: query)
 
@@ -88,13 +96,11 @@ public struct LFMChatModeRouter: ChatModeRouter {
     /// output format. Examples cover the interesting modality-sensitive
     /// pairs ("how do I restart my router" vs "restart my router") —
     /// the exact distinction a 17-intent classifier can't make.
+    ///
+    /// **Single-turn only**: ADR-023 Phase 1's history-aware variant
+    /// was retired by ADR-024 — see the class-level doc above for the
+    /// rationale.
     static func buildPrompt(query: String) -> String {
-        // Critical: the JSON example below uses a neutral mode value
-        // (`<MODE>`) and a generic reasoning placeholder. If the example
-        // uses a specific mode value like "kb_question", LFM2.5-350M's
-        // few-shot pattern copies the example verbatim for every query
-        // (measured: 26.7% accuracy with `kb_question` as the example).
-        // Schema-only examples force the model to actually classify.
         return """
         Classify this telco home internet customer support message into exactly one mode.
 
@@ -125,25 +131,103 @@ public struct LFMChatModeRouter: ChatModeRouter {
     /// fence-stripper and balanced-brace walker so the same emission
     /// quirks (markdown fences, trailing prose) are tolerated in all
     /// LFM-backed classifiers.
+    ///
+    /// **YAML-fallback path (2026-05-27):** on real iPhones the chat-mode-
+    /// router LoRA (Q4-trained, now composed with Q8 base after Phase δ's
+    /// quant-mismatch fix) occasionally emits its answer in YAML-style
+    /// `key: value` lines instead of JSON, then loops back to `JSON:` and
+    /// starts again. The model picks the RIGHT mode — it just emits in
+    /// the wrong format. Rather than fall back to `outOfScope` (which
+    /// contradicts the topic_gate signal), parse the YAML.
+    ///
+    /// Proper fix is a retrain of chat-mode-router on Q8 base. This
+    /// parser-side tolerance is insurance against the same format drift
+    /// recurring under future LoRA composition changes.
     static func parseAssistantJSON(_ raw: String) -> (
         mode: ChatMode,
         confidence: Double,
         reasoning: String
     )? {
         let trimmed = JSONExtract.stripFences(raw).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let jsonSlice = JSONExtract.firstJSONObject(in: trimmed),
-              let data = jsonSlice.data(using: .utf8),
-              let any = try? JSONSerialization.jsonObject(with: data),
-              let dict = any as? [String: Any],
-              let modeString = dict["mode"] as? String,
-              let mode = ChatMode(rawValue: modeString)
-        else { return nil }
 
-        let confidence = (dict["confidence"] as? Double)
-            ?? (dict["confidence"] as? NSNumber)?.doubleValue
-            ?? 0.0
-        let reasoning = (dict["reasoning"] as? String) ?? ""
+        // Primary path: JSON object.
+        if let jsonSlice = JSONExtract.firstJSONObject(in: trimmed),
+           let data = jsonSlice.data(using: .utf8),
+           let any = try? JSONSerialization.jsonObject(with: data),
+           let dict = any as? [String: Any],
+           let modeString = dict["mode"] as? String,
+           let mode = ChatMode(rawValue: modeString) {
+            let confidence = (dict["confidence"] as? Double)
+                ?? (dict["confidence"] as? NSNumber)?.doubleValue
+                ?? 0.0
+            let reasoning = (dict["reasoning"] as? String) ?? ""
+            return (mode, confidence, reasoning)
+        }
 
-        return (mode, confidence, reasoning)
+        // Fallback path: YAML-style `key: value` lines.
+        return parseYAMLStyle(trimmed)
+    }
+
+    /// Tolerant parser for `mode: <value>` / `confidence: <number>` /
+    /// `reasoning: <text>` line-based output. Handles the loop-back
+    /// pattern where the model emits `JSON:` again followed by another
+    /// set of lines — we take the FIRST occurrence of each field and
+    /// stop at the next `JSON:` marker.
+    ///
+    /// Returns nil if `mode` isn't recoverable; tolerates missing
+    /// confidence (defaults to 0.5 — neutral, since the model emitted
+    /// SOMETHING parseable) and missing reasoning (defaults to "").
+    static func parseYAMLStyle(_ text: String) -> (
+        mode: ChatMode,
+        confidence: Double,
+        reasoning: String
+    )? {
+        var mode: ChatMode?
+        var confidence: Double?
+        var reasoning: String = ""
+
+        // Stop scanning at a second "JSON:" marker (the loop-back) so
+        // we don't pick up trailing repetitions that may have different
+        // values.
+        var sawJsonMarker = false
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            // Skip the leading "JSON:" prompt-echo if present; mark on
+            // subsequent ones to terminate.
+            if line.lowercased().hasPrefix("json:") {
+                if sawJsonMarker { break }
+                sawJsonMarker = true
+                continue
+            }
+            // Markdown bullets and YAML list-dashes are tolerated.
+            let stripped = line.drop(while: { $0 == "-" || $0 == "*" || $0.isWhitespace })
+            guard let colonIdx = stripped.firstIndex(of: ":") else { continue }
+            let key = stripped[..<colonIdx]
+                .trimmingCharacters(in: .whitespaces)
+                .lowercased()
+            let valueRaw = stripped[stripped.index(after: colonIdx)...]
+                .trimmingCharacters(in: CharacterSet(charactersIn: " \t\"',"))
+
+            switch key {
+            case "mode":
+                // Take the first mode hit; ignore reps.
+                if mode == nil, let m = ChatMode(rawValue: valueRaw) {
+                    mode = m
+                }
+            case "confidence":
+                if confidence == nil {
+                    confidence = Double(valueRaw)
+                }
+            case "reasoning":
+                if reasoning.isEmpty {
+                    reasoning = String(valueRaw)
+                }
+            default:
+                continue
+            }
+        }
+
+        guard let resolvedMode = mode else { return nil }
+        return (resolvedMode, confidence ?? 0.5, reasoning)
     }
 }

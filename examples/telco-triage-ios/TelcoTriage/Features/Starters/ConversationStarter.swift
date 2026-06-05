@@ -2,11 +2,13 @@ import Foundation
 
 /// Conversation-starter chips shown above the input bar when the chat
 /// is fresh. Six chips, each anchored to a distinct edge-AI primitive
-/// proven by the chat-mode-router-v2 + telco-tool-selector-v3 adapters,
-/// local KB retrieval, and the scenario suite behind the parent app.
+/// proven by the chat-mode-router-v2 + telco-tool-selector-v3 +
+/// kb-extractor-v1 training sets and the scenario suite in
+/// `scripts/test_telco_sidecar_scenarios.py`.
 ///
-/// Every chip's pipeline terminates at an LFM-generated response. Retrieval
-/// may select local context, but the chat answer itself is not hardcoded copy.
+/// Every chip's pipeline terminates at an LFM-generated response —
+/// there are no keyword fallbacks, no cloud mocks, no hardcoded
+/// answer copy.
 ///
 /// Chip → primitive table:
 ///
@@ -65,15 +67,15 @@ public struct ConversationStarter: Identifiable, Sendable {
             id: "c-wifi-slow-kb",
             primitive: "Grounded Q&A",
             icon: "wifi.exclamationmark",
-            label: "Why is my WiFi slow",
+            label: "Fix slow Wi-Fi",
             prompt: "why is my wifi slow"
         ),
         ConversationStarter(
-            id: "c-restart-router-kb",
+            id: "c-change-wifi-password",
             primitive: "Grounded Q&A",
-            icon: "wifi.router",
-            label: "How to restart my router",
-            prompt: "how do I restart my router"
+            icon: "key",
+            label: "Change Wi-Fi password",
+            prompt: "how do I change my wifi password"
         ),
         ConversationStarter(
             id: "c-restart-router-tool",
@@ -83,25 +85,25 @@ public struct ConversationStarter: Identifiable, Sendable {
             prompt: "restart my router"
         ),
         ConversationStarter(
-            id: "c-parental-pause",
-            primitive: "Tool call + arg extraction",
-            icon: "hand.raised",
-            label: "Pause my son's tablet",
-            prompt: "pause internet for my son's tablet"
+            id: "c-run-speed-test",
+            primitive: "Tool call",
+            icon: "speedometer",
+            label: "Run a speed test",
+            prompt: "run a speed test"
         ),
         ConversationStarter(
             id: "c-connected-devices",
             primitive: "Personal summary",
-            icon: "house.and.flag",
-            label: "Show my connected devices",
+            icon: "laptopcomputer.and.iphone",
+            label: "Connected devices",
             prompt: "show my connected devices"
         ),
         ConversationStarter(
-            id: "c-out-of-scope",
-            primitive: "Out-of-scope refusal",
-            icon: "lock.shield",
-            label: "Ask something off-topic",
-            prompt: "what's the weather today"
+            id: "c-parental-profile",
+            primitive: "Tool call + arg extraction",
+            icon: "person.crop.circle.badge.plus",
+            label: "Set parental controls",
+            prompt: "add a profile for my son"
         ),
     ]
 

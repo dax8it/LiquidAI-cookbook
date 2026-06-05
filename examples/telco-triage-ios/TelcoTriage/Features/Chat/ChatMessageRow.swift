@@ -45,37 +45,33 @@ struct ChatMessageRow: View {
 
     var body: some View {
         HStack(alignment: .top) {
-            if message.role == .user { Spacer(minLength: 60) }
-            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
+            if message.role == .user { Spacer(minLength: 54) }
+            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 7) {
                 bubble
                 if message.role == .assistant {
-                    // Engineering mode: pipeline card when the multi-head
-                    // classifier produced a 9-head trace. Otherwise fall
-                    // back to the flat 4-cell trace row (vision, voice,
-                    // generative fallback paths).
-                    if appMode == .engineering,
-                       let trace = message.trace, let routing = message.routing {
-                        if let pipeline = trace.telcoPipeline {
-                            TelcoPipelineCard(trace: pipeline,
-                                              expanded: traceExpandedBinding)
-                        } else {
-                            TraceRow(trace: trace, routingPath: routing.path)
-                        }
-                    }
-                    // Customer mode: subtle "on-device" badge instead of full trace
                     if appMode == .customer, message.trace != nil {
                         onDeviceBadge
                     }
-                    // Action first, then supplemental reference. A user who
-                    // reads "How do I restart?" + sees a "Restart Router"
-                    // button should tap the button. The "Read full article"
-                    // chip is the fallback for people who want to read
-                    // instead of act — it belongs below the primary CTA.
+                    if let entry = message.sourceEntry {
+                        readFullArticleChip(entry: entry)
+                    }
                     if !message.deepLinks.isEmpty {
                         deepLinkRow
                     }
-                    if let entry = message.sourceEntry {
-                        readFullArticleChip(entry: entry)
+                    // Engineering mode: trace row showing routing path,
+                    // chat mode + confidence, latency, etc. The legacy
+                    // 9-head TelcoPipelineCard was deleted along with
+                    // the multi-head decision engine that fed it.
+                    if appMode == .engineering,
+                       let trace = message.trace, let routing = message.routing {
+                        TraceRow(trace: trace, routingPath: routing.path)
+                        // ADR-022 §4.3 Layer 4 — full 5-head understanding
+                        // vector. Renders below TraceRow so the trace
+                        // reads top→down as: routing summary, then the
+                        // signal the router consumed to make that choice.
+                        if let understanding = trace.understanding {
+                            UnderstandingTraceCard(understanding: understanding)
+                        }
                     }
                     if let diagnosis = message.visionDiagnosis {
                         VisionDiagnosisCard(
@@ -102,9 +98,9 @@ struct ChatMessageRow: View {
                     }
                 }
             }
-            if message.role == .assistant { Spacer(minLength: 60) }
+            if message.role == .assistant { Spacer(minLength: 42) }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 16)
     }
 
     private var bubble: some View {
@@ -126,18 +122,74 @@ struct ChatMessageRow: View {
                 }
                 .opacity(0.8)
             }
-            Text(LocalizedStringKey(message.text))
-                .font(brand.bodyFont)
-                .foregroundStyle(message.role == .user ? brand.onPrimary : brand.textPrimary)
-                .textSelection(.enabled)
+            // Internal scheme (vzhome://) is rewritten to the brand
+            // scheme at the render boundary — Stage B + page-link table
+            // + grammar all use the internal scheme so the trained model
+            // stays on distribution. See DeepLinkRebrand.swift.
+            messageContent
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, message.role == .user ? 14 : 15)
+        .padding(.vertical, message.role == .user ? 10 : 12)
         .background(bubbleFill, in: RoundedRectangle(cornerRadius: brand.bubbleCornerRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: brand.bubbleCornerRadius)
+                .stroke(bubbleBorder, lineWidth: 1)
+        )
+        .shadow(
+            color: message.role == .assistant ? .black.opacity(0.035) : .clear,
+            radius: 8,
+            y: 3
+        )
     }
 
     private var bubbleFill: Color {
         message.role == .user ? brand.primary : brand.surfaceElevated
+    }
+
+    private var bubbleBorder: Color {
+        message.role == .user ? Color.clear : brand.border
+    }
+
+    @ViewBuilder
+    private var messageContent: some View {
+        if let presentation = composerStepPresentation {
+            ComposerStepAnswerView(presentation: presentation)
+        } else {
+            Text(LocalizedStringKey(DeepLinkRebrand.forDisplay(message.text, brand: brand)))
+                .font(brand.bodyFont)
+                .foregroundStyle(message.role == .user ? brand.onPrimary : brand.textPrimary)
+                .lineSpacing(2)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var composerStepPresentation: ComposerStepPresentation? {
+        guard message.role == .assistant,
+              message.trace?.composerRoute != nil,
+              message.text.contains(" > ") else {
+            return nil
+        }
+        let parts = message.text
+            .components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard parts.count >= 2 else { return nil }
+        let chain = parts[1]
+        guard let firstSeparator = chain.range(of: " > ") else { return nil }
+        var stepText = String(chain[firstSeparator.upperBound...])
+        if stepText.hasSuffix(".") {
+            stepText.removeLast()
+        }
+        let steps = stepText
+            .components(separatedBy: " > ")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !steps.isEmpty else { return nil }
+        return ComposerStepPresentation(
+            intro: parts[0],
+            steps: steps,
+            confirmation: parts.dropFirst(2).first
+        )
     }
 
     private func readFullArticleChip(entry: KBEntry) -> some View {
@@ -145,17 +197,20 @@ struct ChatMessageRow: View {
             onOpenArticle(entry)
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "doc.text.magnifyingglass")
-                Text("Read full article")
+                Image(systemName: "doc.text")
+                Text("Source: \(entry.topic)")
                     .font(.caption)
                     .fontWeight(.semibold)
+                    .lineLimit(1)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.vertical, 6)
+            .background(brand.surfaceElevated, in: Capsule())
             .overlay(Capsule().stroke(brand.border, lineWidth: 1))
-            .foregroundStyle(brand.textPrimary)
+            .foregroundStyle(brand.textSecondary)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Open source article, \(entry.topic)")
     }
 
     /// Minimal customer-facing badge confirming the response was generated
@@ -175,7 +230,11 @@ struct ChatMessageRow: View {
             }
         }
         .foregroundStyle(brand.textSecondary)
-        .padding(.leading, 4)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(brand.surfaceElevated, in: Capsule())
+        .overlay(Capsule().stroke(brand.border.opacity(0.7), lineWidth: 1))
+        .padding(.leading, 2)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(onDeviceBadgeAccessibilityLabel)
     }
@@ -194,6 +253,73 @@ struct ChatMessageRow: View {
             }
         }
         .padding(.leading, 4)
+    }
+}
+
+private struct ComposerStepPresentation: Equatable {
+    let intro: String
+    let steps: [String]
+    let confirmation: String?
+}
+
+private struct ComposerStepAnswerView: View {
+    let presentation: ComposerStepPresentation
+
+    @Environment(\.brand) private var brand
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(presentation.intro)
+                .font(brand.bodyFont)
+                .foregroundStyle(brand.textPrimary)
+                .lineSpacing(2)
+                .textSelection(.enabled)
+
+            VStack(alignment: .leading, spacing: 9) {
+                Text("Steps")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(brand.textSecondary)
+                    .textCase(.uppercase)
+                ForEach(Array(presentation.steps.enumerated()), id: \.offset) { index, step in
+                    HStack(alignment: .top, spacing: 9) {
+                        Text("\(index + 1)")
+                            .font(.caption2)
+                            .fontWeight(.bold)
+                            .foregroundStyle(brand.textPrimary)
+                            .frame(width: 20, height: 20)
+                            .background(brand.textPrimary.opacity(0.06), in: Circle())
+                        Text(step)
+                            .font(brand.bodyFont)
+                            .foregroundStyle(brand.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .padding(11)
+            .background(brand.textPrimary.opacity(0.035),
+                        in: RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(brand.border.opacity(0.7), lineWidth: 1)
+            )
+
+            if let confirmation = presentation.confirmation {
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: "checkmark.shield")
+                        .font(.caption)
+                        .foregroundStyle(brand.success)
+                        .padding(.top, 2)
+                    Text(confirmation)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundStyle(brand.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 1)
+            }
+        }
     }
 }
 
@@ -230,13 +356,16 @@ struct DeepLinkChip: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: "arrow.up.right.square")
-            Text(link.label)
+            Image(systemName: "arrow.turn.down.right")
+                .font(.caption2)
+            Text(link.label == "Open in app" ? "Open in app" : "Open \(link.label)")
                 .font(.caption)
-                .fontWeight(.medium)
+                .fontWeight(.semibold)
+                .lineLimit(1)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 6)
+        .background(brand.textPrimary.opacity(0.055), in: Capsule())
         .overlay(Capsule().stroke(brand.border, lineWidth: 1))
         .foregroundStyle(brand.textPrimary)
         // Decorative non-interactive route hint — VoiceOver should
@@ -259,6 +388,9 @@ struct ToolDecisionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if decision.isCompoundAttachment {
+                compoundCaption
+            }
             header
             if !decision.arguments.isEmpty {
                 extractedArgumentsSection
@@ -274,6 +406,23 @@ struct ToolDecisionCard: View {
             RoundedRectangle(cornerRadius: brand.cardCornerRadius)
                 .stroke(brand.textSecondary.opacity(0.2), lineWidth: 1)
         )
+    }
+
+    /// Caption that re-frames the card as a one-tap shortcut beneath a
+    /// how-to article, rather than the primary CTA. ADR-022 §4.3
+    /// compound-response review — when the imperative tool detector
+    /// fires on a RAG / unknown-feature / clarification turn, we render
+    /// BOTH the article AND the action affordance so the user can read
+    /// the explanation OR tap once. This caption is the visual cue.
+    private var compoundCaption: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "wand.and.stars")
+                .font(.caption2)
+                .foregroundStyle(brand.accent)
+            Text("Or, want me to do this for you?")
+                .font(.caption).fontWeight(.semibold)
+                .foregroundStyle(brand.textSecondary)
+        }
     }
 
     private var header: some View {

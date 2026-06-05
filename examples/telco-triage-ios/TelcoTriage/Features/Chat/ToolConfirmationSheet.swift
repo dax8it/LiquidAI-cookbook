@@ -15,20 +15,25 @@ struct ToolConfirmationSheet: View {
     @Environment(\.brand) private var brand
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 22) {
             // Icon + title
             VStack(spacing: 12) {
                 Image(systemName: decision.icon)
                     .font(.system(size: 36))
-                    .foregroundStyle(brand.primary)
+                    .foregroundStyle(brand.textPrimary)
                     .frame(width: 64, height: 64)
-                    .background(brand.primary.opacity(0.1), in: Circle())
+                    .background(brand.textPrimary.opacity(0.06), in: Circle())
+                    .overlay(Circle().stroke(brand.border, lineWidth: 1))
 
                 Text(decision.displayName)
                     .font(.title3)
                     .fontWeight(.semibold)
                     .foregroundStyle(brand.textPrimary)
                     .multilineTextAlignment(.center)
+
+                Text("Review before I make a change.")
+                    .font(.caption)
+                    .foregroundStyle(brand.textSecondary)
             }
 
             // Plain-English summary of what will happen
@@ -65,16 +70,20 @@ struct ToolConfirmationSheet: View {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(brand.warning)
-                    Text("This action cannot be undone")
+                    Text("This may briefly interrupt service.")
                         .font(.caption)
-                        .foregroundStyle(brand.warning)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(brand.textPrimary)
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(brand.warning.opacity(0.10), in: Capsule())
             }
 
             // Action buttons
             VStack(spacing: 10) {
                 Button(action: onConfirm) {
-                    Text(decision.isDestructive ? "Confirm" : "Sounds good")
+                    Text(decision.isDestructive ? "Confirm action" : "Sounds good")
                         .font(.body)
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity)
@@ -97,5 +106,6 @@ struct ToolConfirmationSheet: View {
         }
         .padding(24)
         .padding(.top, 8)
+        .background(brand.surfaceElevated)
     }
 }

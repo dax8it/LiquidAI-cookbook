@@ -40,10 +40,19 @@ struct SettingsView: View {
     }
 
     private var kbSection: some View {
-        Section(header: Text("Knowledge base")) {
-            LabeledContent("Version", value: appState.knowledgeBase.version)
-            LabeledContent("Entries", value: "\(appState.knowledgeBase.entries.count)")
-            Text("Drop a newer `knowledge-base.json` into the app's Documents directory and relaunch to use it without rebuilding.")
+        Section(header: Text("Composer RAG")) {
+            LabeledContent("Status", value: appState.ragStatus.isLive ? "Live" : "Degraded")
+            LabeledContent("Corpus", value: "rag-units-v1.json")
+            LabeledContent(
+                "Units",
+                value: appState.ragStatus.corpusUnitCount.map(String.init) ?? "—"
+            )
+            LabeledContent("Retriever", value: "BM25 hierarchy")
+            LabeledContent("Answer layer", value: "Deterministic composer")
+            if let reason = appState.ragStatus.degradedReason {
+                LabeledContent("Reason", value: reason)
+            }
+            Text("Normal demo answers use the canonical composer corpus and render only approved `vzhome://` links. The legacy 34-entry keyword KB is kept as a fallback for degraded builds.")
                 .font(.caption).foregroundStyle(brand.textSecondary)
         }
     }
@@ -53,26 +62,39 @@ struct SettingsView: View {
         if appState.appMode == .engineering {
             Section(header: Text("On-device models")) {
                 LabeledContent("Base", value: TelcoModelBundle.baseModelName)
-                LabeledContent("Decision heads", value: TelcoModelBundle.sharedClfAdapterPath() == nil ? "paired adapters" : TelcoModelBundle.sharedClfAdapterName)
-                LabeledContent("Chat router", value: Self.chatRouterLabel)
-                LabeledContent("Tool selector", value: Self.toolSelectorLabel)
-                LabeledContent("KB extractor", value: TelcoModelBundle.kbExtractorAdapterName)
-                Text("Simple support decisions run on-device. Complex requests can be handed to an existing cloud AI stack after privacy review.")
+                LabeledContent(
+                    "Legacy decision heads",
+                    value: TelcoModelBundle.sharedClfAdapterPath() == nil
+                        ? "not active"
+                        : TelcoModelBundle.sharedClfAdapterName
+                )
+                LabeledContent(
+                    "Legacy chat router",
+                    value: TelcoModelBundle.chatModeRouterAdapterPath() == nil
+                        ? "not bundled"
+                        : TelcoModelBundle.chatModeRouterAdapterName
+                )
+                LabeledContent("Tool selector", value: TelcoModelBundle.toolAdapterName)
+                Text("Customer Q&A uses the composer path. Legacy understanding adapters are shown only for degraded builds and opt-in experiments.")
+                    .font(.caption).foregroundStyle(brand.textSecondary)
+            }
+
+            Section(header: Text("Legacy Stage B probe")) {
+                NavigationLink {
+                    VerizonRAGTestView()
+                } label: {
+                    LabeledContent(
+                        "Stage B generator",
+                        value: TelcoModelBundle.verizonStageBGeneratorPath() == nil
+                            ? "not bundled"
+                            : TelcoModelBundle.verizonStageBGeneratorName
+                    )
+                }
+                .disabled(TelcoModelBundle.verizonStageBGeneratorPath() == nil)
+                Text("Optional evaluation surface only. The normal answer path is BM25HierarchyRetriever plus the deterministic composer; Stage B is not required for grounded answers.")
                     .font(.caption).foregroundStyle(brand.textSecondary)
             }
         }
-    }
-
-    private static var chatRouterLabel: String {
-        TelcoModelBundle.pairedClassifierStackBundled()
-            ? "\(TelcoModelBundle.chatModeClfAdapterName) + head"
-            : TelcoModelBundle.chatModeRouterAdapterName
-    }
-
-    private static var toolSelectorLabel: String {
-        TelcoModelBundle.pairedClassifierStackBundled()
-            ? "\(TelcoModelBundle.toolSelectorClfAdapterName) + head"
-            : TelcoModelBundle.toolAdapterName
     }
 
     @ViewBuilder
@@ -91,7 +113,7 @@ struct SettingsView: View {
         Section(header: Text("About")) {
             LabeledContent("Build", value: "\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"))")
             LabeledContent("App", value: "\(brand.appName) \(brand.appSubtitle)")
-            Text("Generic telco support assistant demo running LFM2.5-350M-Base with multi-head triage, local Q&A, voice-ready input, and cloud handoff for complex cases.")
+            Text("Liquid Telco Triage runs LFM2.5-350M on-device for routing, safe action decisions, and private support flows. Grounded Q&A uses BM25 composer RAG over canonical support units with explicit confirmation before supported actions.")
                 .font(.caption).foregroundStyle(brand.textSecondary)
         }
     }

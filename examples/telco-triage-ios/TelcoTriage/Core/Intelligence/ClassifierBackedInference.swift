@@ -173,8 +173,8 @@ public struct ClassifierKBExtractor: KBExtractor {
 // MARK: - ToolSelector (classifier-backed)
 
 /// Classifier-backed tool selector. The head outputs one of 9 labels
-/// (8 tools + "none"). Free-form slots come from the existing query
-/// extraction stage after the model has chosen the tool.
+/// (8 tools + "none"). Arguments are not extracted by the classifier —
+/// tools that need arguments will get empty defaults.
 public struct ClassifierToolSelector: ToolSelector {
     private let bridge: ClassifierBackedBridge
 
@@ -217,7 +217,7 @@ public struct ClassifierToolSelector: ToolSelector {
             return ToolSelection(
                 intent: intent,
                 confidence: Double(prediction.confidence),
-                arguments: TelcoDecisionRouter.arguments(for: intent, extraction: extraction),
+                arguments: .empty,
                 reasoning: "classifier head (softmax \(String(format: "%.1f", prediction.confidence * 100))%)",
                 runtimeMS: runtimeMS
             )

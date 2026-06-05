@@ -146,13 +146,34 @@ public struct RegexQueryExtractor: QueryExtractor {
     }
 
     private static func findTargetDevice(in text: String) -> String? {
-        // Terminator set includes `until|for` so "pause my son's tablet
-        // until 7" doesn't capture the time phrase into the target
-        // device slot. Also includes `tonight` so "pause the tablet
-        // tonight" resolves cleanly.
+        // Terminator set includes `until|tonight` so "pause my son's
+        // tablet until 7" doesn't capture the time phrase into the
+        // target device slot.
+        //
+        // Pattern order matters — `for-target` variants ("pause
+        // internet for <device>") MUST come before the generic "pause
+        // <noun>" patterns. Otherwise "pause internet for my son's
+        // tablet" captures "internet" (because " for" is in the
+        // generic terminator set) and the user sees the absurd
+        // "I'll pause internet for internet" framing. This was the
+        // bug surfaced on the iPhone build at session-053 +
+        // 2026-05-24: the LFMToolSelector used to extract the target
+        // semantically; once ImperativeToolDetector started fast-
+        // pathing to the regex extractor, the bad capture became
+        // user-visible.
         let patterns = [
+            // "pause [internet/wifi/network] for [my|the] X" → target = X.
+            // Canonical Verizon parental-controls phrasing. The
+            // internet-noun is consumed non-capturing so X is the
+            // device or person.
+            #"(?:block|pause|resume|unblock|stop|shut\s+off|disable|kill|cut\s+off)\s+(?:the\s+)?(?:internet|wifi|wi-fi|wi\s+fi|network|connection|access|data)\s+(?:for|on)\s+(?:my\s+|the\s+|his\s+|her\s+|their\s+)?(.+?)(?:\s+(?:until|tonight|tomorrow|this\s+\w+)\b|[,.!?]|$)"#,
+            // "pause my X (until|tonight ...)" — direct possessive.
             #"(?:block|pause|resume|unblock|stop)\s+my\s+(.+?)(?:\s+(?:from|on)\s+the\s+internet|\s+(?:until|for|tonight)\b|\s+and\b|[,.!?]|$)"#,
+            // "pause X (until|tonight ...)" — generic fallback. Keeps
+            // "for" in the terminator set so "pause Netflix for
+            // tonight" captures "Netflix", not "Netflix for tonight".
             #"(?:block|pause|resume|unblock|stop)\s+(.+?)(?:\s+(?:from|on)\s+the\s+internet|\s+(?:until|for|tonight)\b|\s+and\b|[,.!?]|$)"#,
+            // "set up a bedtime for X" — schedule-style parental control.
             #"(?:set up|create)\s+a\s+bedtime\s+for\s+([^,.!?]+)"#,
         ]
 
@@ -181,7 +202,7 @@ public struct LFMQueryExtractor: QueryExtractor {
     public init() {}
 
     public func extract(from query: String) -> ExtractionResult {
-        // TELCO EXTRACTION MODEL SWAP POINT.
+        // ⚙️ TELCO EXTRACTION FINE-TUNE SWAP POINT.
         // Load `LFM2.5-350M-Telco-Extract` via LFMEngine here when trained.
         // Production uses `RegexQueryExtractor` until then.
         return ExtractionResult(runtimeMS: 0)

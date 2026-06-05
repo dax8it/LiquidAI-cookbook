@@ -35,8 +35,11 @@ final class TestChatHarness {
     init(
         kb: KnowledgeBase = .loadFromBundle(),
         profile: CustomerProfile = .demo,
-        useFastGroundedQA: Bool = false,
-        decisionEngine: (any TelcoDecisionEngine)? = nil
+        useSimulatorFastGroundedQA: Bool = false,
+        conversationState: ConversationState? = nil,
+        verizonDispatcher: VerizonChatDispatcher? = nil,
+        understandingClassifier: QueryUnderstandingClassifying? = nil,
+        relationalStrategy: RelationalHeadsStrategy? = nil
     ) {
         self.knowledgeBase = kb
         let pii = PIIAnalyzer()
@@ -72,7 +75,6 @@ final class TestChatHarness {
         self.kbExtractor = kbExtractor
 
         self.vm = ChatViewModel(
-            decisionEngine: decisionEngine,
             chatModeRouter: modeRouter,
             kbExtractor: kbExtractor,
             provider: provider,
@@ -86,7 +88,11 @@ final class TestChatHarness {
             nbaEngine: nba,
             toolSelector: tool,
             toolExecutor: executor,
-            useFastGroundedQA: useFastGroundedQA,
+            verizonDispatcher: verizonDispatcher,
+            understandingClassifier: understandingClassifier,
+            relationalStrategy: relationalStrategy,
+            conversationState: conversationState,
+            useSimulatorFastGroundedQA: useSimulatorFastGroundedQA,
             welcomeGreetingProvider: { "Welcome" }
         )
     }

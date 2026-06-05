@@ -19,10 +19,6 @@ extension ChatViewModel {
     /// cloud VLM, so the Savings dashboard stays honest.
     func processVisionQuery(query: String, image: UIImage) async {
         isProcessing = true
-        // Vision path doesn't run the multi-head text classifier, so
-        // the trace must not carry over from a prior text turn.
-        lastTelcoVector = nil
-        lastTelcoLane = nil
         defer { isProcessing = false }
 
         do {

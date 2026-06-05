@@ -6,7 +6,6 @@ struct ChatInputBar: View {
     let isProcessing: Bool
     let attachedImage: UIImage?
     let isListening: Bool
-    let isTranscribing: Bool
     let listeningPartial: String
     /// Non-nil when the last voice attempt failed (permissions denied,
     /// session refused, etc.). Shown inline so "nothing happens" stops
@@ -29,10 +28,10 @@ struct ChatInputBar: View {
             if let image = attachedImage {
                 attachmentChip(image)
             }
-            if isListening || isTranscribing {
+            if isListening {
                 listeningStrip
             }
-            if let err = voiceError, !isListening && !isTranscribing {
+            if let err = voiceError, !isListening {
                 voiceErrorStrip(err)
             }
             HStack(spacing: 8) {
@@ -40,8 +39,16 @@ struct ChatInputBar: View {
                 TextField(brand.chatPlaceholder, text: $text, axis: .vertical)
                     .lineLimit(1...4)
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(brand.surfaceElevated, in: RoundedRectangle(cornerRadius: brand.bubbleCornerRadius))
+                    .padding(.vertical, 11)
+                    .foregroundStyle(brand.textPrimary)
+                    .background(
+                        brand.textPrimary.opacity(0.035),
+                        in: RoundedRectangle(cornerRadius: 14)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(brand.border, lineWidth: 1)
+                    )
                     .submitLabel(.send)
                     .onSubmit { if canSend { onSend() } }
                 micButton
@@ -49,12 +56,18 @@ struct ChatInputBar: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.top, 10)
+        .padding(.bottom, 12)
         .background(
             Rectangle()
-                .fill(brand.surfaceBackground)
-                .shadow(color: .black.opacity(0.06), radius: 8, y: -2)
+                .fill(brand.surfaceElevated)
+                .shadow(color: .black.opacity(0.08), radius: 14, y: -4)
         )
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(brand.border)
+                .frame(height: 1)
+        }
     }
 
     private var canSend: Bool {
@@ -79,7 +92,11 @@ struct ChatInputBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(brand.surfaceElevated, in: RoundedRectangle(cornerRadius: 10))
+        .background(brand.textPrimary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(brand.border, lineWidth: 1)
+        )
     }
 
     private var listeningStrip: some View {
@@ -99,12 +116,12 @@ struct ChatInputBar: View {
                 .onDisappear { pulseOn = false }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(voiceStatusText)
+                Text(listeningPartial.isEmpty ? "Listening… tap Stop when done" : listeningPartial)
                     .font(.callout)
                     .foregroundStyle(brand.textPrimary)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
-                if !listeningPartial.isEmpty || isTranscribing {
+                if !listeningPartial.isEmpty {
                     Text("On-device · nothing leaves your phone")
                         .font(.caption2)
                         .foregroundStyle(brand.textSecondary)
@@ -113,36 +130,27 @@ struct ChatInputBar: View {
 
             Spacer()
 
-            if isListening {
-                // Full-size Stop button — primary-filled so it reads as
-                // the main action on this strip.
-                Button(action: onMicTap) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "stop.fill")
-                        Text("Stop")
-                    }
-                    .font(.subheadline).fontWeight(.semibold)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(brand.primary, in: Capsule())
-                    .foregroundStyle(brand.onPrimary)
+            // Full-size Stop button — primary-filled so it reads as
+            // the main action on this strip.
+            Button(action: onMicTap) {
+                HStack(spacing: 6) {
+                    Image(systemName: "stop.fill")
+                    Text("Stop")
                 }
-                .accessibilityLabel("Stop recording and place text in input field")
+                .font(.subheadline).fontWeight(.semibold)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(brand.primary, in: Capsule())
+                .foregroundStyle(brand.onPrimary)
             }
+            .accessibilityLabel("Stop recording and place text in input field")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(brand.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .background(brand.textPrimary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(brand.primary.opacity(0.25), lineWidth: 1)
+                .stroke(brand.border, lineWidth: 1)
         )
-    }
-
-    private var voiceStatusText: String {
-        if isTranscribing {
-            return listeningPartial.isEmpty ? "Transcribing locally…" : listeningPartial
-        }
-        return listeningPartial.isEmpty ? "Listening… tap Stop when done" : listeningPartial
     }
 
     private var cameraButton: some View {
@@ -151,6 +159,7 @@ struct ChatInputBar: View {
                 .font(.system(size: 22))
                 .foregroundStyle(brand.textSecondary)
                 .frame(width: 36, height: 36)
+                .background(brand.textPrimary.opacity(0.035), in: Circle())
         }
         .accessibilityLabel("Attach photo")
     }
@@ -175,17 +184,11 @@ struct ChatInputBar: View {
         Button(action: onMicTap) {
             Image(systemName: isListening ? "mic.fill" : "mic")
                 .font(.system(size: 22))
-                .foregroundStyle(micForeground)
+                .foregroundStyle(isListening ? brand.primary : brand.textSecondary)
                 .frame(width: 36, height: 36)
+                .background(brand.textPrimary.opacity(0.035), in: Circle())
         }
-        .disabled(isTranscribing)
         .accessibilityLabel(isListening ? "Stop recording" : "Voice input")
-    }
-
-    private var micForeground: Color {
-        if isListening { return brand.primary }
-        if isProcessing || isTranscribing { return brand.textSecondary.opacity(0.35) }
-        return brand.textSecondary
     }
 
     private var sendButton: some View {
@@ -194,7 +197,7 @@ struct ChatInputBar: View {
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(canSend ? brand.onPrimary : brand.textSecondary.opacity(0.5))
                 .frame(width: 36, height: 36)
-                .background(canSend ? brand.primary : brand.surfaceElevated, in: Circle())
+                .background(canSend ? brand.primary : brand.textPrimary.opacity(0.035), in: Circle())
         }
         .disabled(!canSend)
         .accessibilityLabel("Send message")

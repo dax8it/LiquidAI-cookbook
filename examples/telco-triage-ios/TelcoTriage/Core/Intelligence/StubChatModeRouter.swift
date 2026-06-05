@@ -59,6 +59,10 @@ public actor ScriptedChatModeRouter: ChatModeRouter {
     private var rules: [Rule] = []
     private let fallback: ChatModePrediction
 
+    /// Every query received, oldest first. Tests asserting on
+    /// multi-turn flows can verify the classifier was hit per turn.
+    public private(set) var recordedQueries: [String] = []
+
     public init(
         fallback: ChatModePrediction = ChatModePrediction(
             mode: .outOfScope,
@@ -79,6 +83,7 @@ public actor ScriptedChatModeRouter: ChatModeRouter {
     }
 
     private func dispatch(query: String) -> ChatModePrediction {
+        recordedQueries.append(query)
         for rule in rules where query.lowercased().contains(rule.matches.lowercased()) {
             return rule.prediction
         }

@@ -5,7 +5,7 @@ private let proxyHealthTimeout: TimeInterval = 5
 /// Default timeout for proxy inference requests (seconds).
 private let proxyInferenceTimeout: TimeInterval = 10
 
-/// Proxy mode implementation for HTTP inference backends.
+/// Proxy mode implementation — HTTP calls to the H100 FastAPI backend.
 extension LFMEngine {
 
     // MARK: - Connection Validation

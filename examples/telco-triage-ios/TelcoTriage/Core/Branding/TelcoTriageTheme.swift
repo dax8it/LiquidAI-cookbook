@@ -1,21 +1,21 @@
 import SwiftUI
 
-/// Generic telco triage theme. Carrier-specific skins can still register
-/// their own brand, but the default demo now mirrors Edge Banking: a
-/// neutral solution pattern first, customer logo second.
+/// Carrier-neutral Liquid telco theme. The customer-facing demo should feel
+/// like a premium reference app a carrier can imagine reskinning, so the
+/// surface is intentionally light, quiet, and not tied to any one operator.
 public struct TelcoTriageTheme: BrandTheme {
     public let id = "telco-triage"
-    public let displayName = "Telco Triage"
-    public let tagline = "by Liquid AI"
+    public let displayName = "Liquid Telco"
+    public let tagline = "On-device support by Liquid AI"
 
-    public let primary = Color(red: 0.08, green: 0.08, blue: 0.09)
+    public let primary = Color(red: 0.07, green: 0.07, blue: 0.08)
     public let onPrimary = Color.white
-    public let accent = Color(red: 0.24, green: 0.45, blue: 0.95)
-    public let surfaceBackground = Color(.systemBackground)
-    public let surfaceElevated = Color(.secondarySystemBackground)
-    public let border = Color.black.opacity(0.1)
-    public let textPrimary = Color.primary
-    public let textSecondary = Color.secondary
+    public let accent = Color(red: 0.33, green: 0.43, blue: 0.92)
+    public let surfaceBackground = Color(red: 0.965, green: 0.969, blue: 0.976)
+    public let surfaceElevated = Color.white
+    public let border = Color.black.opacity(0.10)
+    public let textPrimary = Color(red: 0.07, green: 0.09, blue: 0.13)
+    public let textSecondary = Color(red: 0.31, green: 0.35, blue: 0.42)
 
     public let success = Color(red: 0.12, green: 0.7, blue: 0.4)
     public let warning = Color(red: 0.95, green: 0.65, blue: 0.0)
@@ -27,23 +27,25 @@ public struct TelcoTriageTheme: BrandTheme {
     public let monoFont = Font.system(.caption, design: .monospaced)
 
     public let bubbleCornerRadius: CGFloat = 18
-    public let cardCornerRadius: CGFloat = 14
+    public let cardCornerRadius: CGFloat = 16
 
-    public let appName = "Telco Triage"
-    public let appSubtitle = "by Liquid AI"
+    public let appName = "Liquid Telco"
+    public let appSubtitle = "On-device support"
     public let assistantName = "Telco Assistant"
-    public let chatPlaceholder = "Ask about Wi-Fi, router, bill..."
-    public let deepLinkScheme = "telco"
+    public let chatPlaceholder = "Ask about Wi-Fi, devices, or your router"
+    public let deepLinkScheme = "liquid-telco-triage"
     public let wordmarkSystemImage = "antenna.radiowaves.left.and.right"
 
     public var welcomeGreeting: @Sendable (String) -> String {
         { name in
             if name.isEmpty {
-                return "Hi - I'm your telco support assistant running on-device with Liquid AI. I can answer home internet questions, triage Wi-Fi issues, prepare safe tool actions, and hand off complex requests to cloud only with approval."
+                return "Hi - I can help with home internet questions, Wi-Fi settings, connected devices, and safe router actions. Everything here runs on-device."
             }
-            return "Hi \(name) - I'm your telco support assistant running on-device with Liquid AI. I can answer home internet questions, triage Wi-Fi issues, prepare safe tool actions, and hand off complex requests to cloud only with approval."
+            return "Hi \(name) - I can help with home internet questions, Wi-Fi settings, connected devices, and safe router actions. Everything here runs on-device."
         }
     }
 
     public init() {}
 }
+
+public typealias VerizonTheme = TelcoTriageTheme

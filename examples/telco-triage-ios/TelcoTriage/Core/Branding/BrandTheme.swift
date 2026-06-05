@@ -3,8 +3,8 @@ import SwiftUI
 /// The contract every brand must satisfy. All UI colors, copy, and shape
 /// primitives come from here — views must never hardcode `.red`, `.black`,
 /// or literal strings for app-name / assistant-name. That keeps the generic
-/// Telco skin one-swap-removed from any carrier that wants the same solution
-/// pattern reskinned.
+/// Telco skin one-swap-removed from any carrier (T-Mobile, AT&T, Bell,
+/// Rogers, Vodafone, Verizon) that wants the same POC reskinned.
 public protocol BrandTheme: Sendable {
     var id: String { get }
     var displayName: String { get }
@@ -36,7 +36,7 @@ public protocol BrandTheme: Sendable {
     var cardCornerRadius: CGFloat { get }
 
     // Copy
-    var appName: String { get }            // "Telco Triage"
+    var appName: String { get }            // "Liquid Telco"
     var appSubtitle: String { get }        // "by Liquid AI"
     var assistantName: String { get }      // "Telco Assistant" / "Liquid Support"
     var welcomeGreeting: @Sendable (String) -> String { get } // personalized greeting

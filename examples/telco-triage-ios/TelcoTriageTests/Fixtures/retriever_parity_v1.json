@@ -1,0 +1,719 @@
+{
+  "version": "parity_v1",
+  "rows": [
+    {
+      "query": "restart my router",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "02.07",
+          "score": 11.670307,
+          "link_id": "restart-router",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "02.14",
+          "score": 10.974806,
+          "link_id": "equipment",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "02.13",
+          "score": 10.863799,
+          "link_id": "equipment",
+          "action_affordance": "tool_action"
+        }
+      ]
+    },
+    {
+      "query": "how do I restart my router?",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "02.07",
+          "score": 10.170307,
+          "link_id": "restart-router",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "02.14",
+          "score": 9.474806,
+          "link_id": "equipment",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "02.13",
+          "score": 9.363799,
+          "link_id": "equipment",
+          "action_affordance": "tool_action"
+        }
+      ]
+    },
+    {
+      "query": "reboot the router",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "02.07",
+          "score": 14.399417,
+          "link_id": "restart-router",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "01.02",
+          "score": 8.277501,
+          "link_id": "speed-test",
+          "action_affordance": "assist"
+        },
+        {
+          "page_id": "02.10",
+          "score": 2.704211,
+          "link_id": "equipment",
+          "action_affordance": "tool_action"
+        }
+      ]
+    },
+    {
+      "query": "power cycle my router",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "02.07",
+          "score": 17.817661,
+          "link_id": "restart-router",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "02.15",
+          "score": 7.73165,
+          "link_id": "equipment",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "05.00",
+          "score": 5.801692,
+          "link_id": "tab-discover",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "change my wifi password",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.00",
+          "score": 15.634942,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.02",
+          "score": 13.954941,
+          "link_id": "share-wifi",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "02.08",
+          "score": 11.99031,
+          "link_id": "equipment",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "change password",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.00",
+          "score": 12.178936,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "06.01",
+          "score": 11.672156,
+          "link_id": "tab-more",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.02",
+          "score": 10.574082,
+          "link_id": "share-wifi",
+          "action_affordance": "tool_action"
+        }
+      ]
+    },
+    {
+      "query": "reset wifi password",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.00",
+          "score": 14.84114,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.02",
+          "score": 13.954941,
+          "link_id": "share-wifi",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "02.07",
+          "score": 12.936459,
+          "link_id": "restart-router",
+          "action_affordance": "tool_action"
+        }
+      ]
+    },
+    {
+      "query": "wifi password",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.00",
+          "score": 12.823145,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.02",
+          "score": 12.454941,
+          "link_id": "share-wifi",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "03.03",
+          "score": 10.821667,
+          "link_id": "network",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "share my wifi",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.02",
+          "score": 16.117063,
+          "link_id": "share-wifi",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "03.00",
+          "score": 12.486789,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "02.07",
+          "score": 10.21823,
+          "link_id": "restart-router",
+          "action_affordance": "tool_action"
+        }
+      ]
+    },
+    {
+      "query": "share wifi password",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.02",
+          "score": 19.191146,
+          "link_id": "share-wifi",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "03.00",
+          "score": 15.853928,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "02.08",
+          "score": 10.710311,
+          "link_id": "equipment",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "parental controls",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "13.00",
+          "score": 13.294666,
+          "link_id": "home",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "05.00",
+          "score": 5.719878,
+          "link_id": "tab-discover",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "01.00",
+          "score": 5.675414,
+          "link_id": "tab-home",
+          "action_affordance": "navigate"
+        }
+      ]
+    },
+    {
+      "query": "kid mode",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "13.00",
+          "score": 13.636344,
+          "link_id": "home",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "13.02",
+          "score": 10.538348,
+          "link_id": "home",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "03.01",
+          "score": 3.292261,
+          "link_id": "network",
+          "action_affordance": "tool_action"
+        }
+      ]
+    },
+    {
+      "query": "pause internet for my son",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "13.00",
+          "score": 11.403291,
+          "link_id": "home",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "13.03",
+          "score": 5.889149,
+          "link_id": "home",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "13.02",
+          "score": 5.761057,
+          "link_id": "home",
+          "action_affordance": "tool_action"
+        }
+      ]
+    },
+    {
+      "query": "run speed test",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "01.02",
+          "score": 20.346027,
+          "link_id": "speed-test",
+          "action_affordance": "assist"
+        },
+        {
+          "page_id": "01.01",
+          "score": 5.857904,
+          "link_id": "tab-troubleshoot",
+          "action_affordance": "assist"
+        },
+        {
+          "page_id": "02.02",
+          "score": 4.983887,
+          "link_id": "equipment",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "how fast is my internet?",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "01.02",
+          "score": 8.218051,
+          "link_id": "speed-test",
+          "action_affordance": "assist"
+        },
+        {
+          "page_id": "13.00",
+          "score": 7.946645,
+          "link_id": "home",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "02.07",
+          "score": 7.560959,
+          "link_id": "restart-router",
+          "action_affordance": "tool_action"
+        }
+      ]
+    },
+    {
+      "query": "check my speed",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "01.02",
+          "score": 13.859926,
+          "link_id": "speed-test",
+          "action_affordance": "assist"
+        },
+        {
+          "page_id": "06.04",
+          "score": 3.401939,
+          "link_id": "report-bug",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.06",
+          "score": 3.217603,
+          "link_id": "tab-devices",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "show me my devices",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "04.00",
+          "score": 9.594608,
+          "link_id": "tab-devices",
+          "action_affordance": "navigate"
+        },
+        {
+          "page_id": "13.01",
+          "score": 8.691578,
+          "link_id": "home",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "04.02",
+          "score": 8.607154,
+          "link_id": "tab-devices",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "how many devices are connected?",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "04.00",
+          "score": 10.393407,
+          "link_id": "tab-devices",
+          "action_affordance": "navigate"
+        },
+        {
+          "page_id": "02.08",
+          "score": 9.900732,
+          "link_id": "equipment",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "04.01",
+          "score": 6.177812,
+          "link_id": "device-network-map",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "block a device",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "04.00",
+          "score": 10.92732,
+          "link_id": "tab-devices",
+          "action_affordance": "navigate"
+        },
+        {
+          "page_id": "13.00",
+          "score": 9.824307,
+          "link_id": "home",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "12.00",
+          "score": 9.043056,
+          "link_id": "tab-home",
+          "action_affordance": "navigate"
+        }
+      ]
+    },
+    {
+      "query": "block any new devices",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "04.00",
+          "score": 14.968102,
+          "link_id": "tab-devices",
+          "action_affordance": "navigate"
+        },
+        {
+          "page_id": "13.00",
+          "score": 10.653757,
+          "link_id": "home",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "12.00",
+          "score": 9.043056,
+          "link_id": "tab-home",
+          "action_affordance": "navigate"
+        }
+      ]
+    },
+    {
+      "query": "show data usage",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "04.00",
+          "score": 15.712086,
+          "link_id": "tab-devices",
+          "action_affordance": "navigate"
+        },
+        {
+          "page_id": "03.07",
+          "score": 14.151341,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.04",
+          "score": 5.763676,
+          "link_id": "network",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "SSID",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.00",
+          "score": 10.113404,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.08",
+          "score": 4.503982,
+          "link_id": "network",
+          "action_affordance": "tool_action"
+        }
+      ]
+    },
+    {
+      "query": "split bands",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.00",
+          "score": 15.694052,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.03",
+          "score": 9.771155,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "04.01",
+          "score": 2.680807,
+          "link_id": "device-network-map",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "split my bands",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.00",
+          "score": 15.694052,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.03",
+          "score": 9.771155,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "04.01",
+          "score": 2.680807,
+          "link_id": "device-network-map",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "2.4 GHz",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.00",
+          "score": 13.487063,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "04.01",
+          "score": 7.41941,
+          "link_id": "device-network-map",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.03",
+          "score": 6.466423,
+          "link_id": "network",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "5GHz",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.00",
+          "score": 11.521846,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "04.01",
+          "score": 5.742106,
+          "link_id": "device-network-map",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.03",
+          "score": 5.113119,
+          "link_id": "network",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "turn off 5GHz band",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "03.03",
+          "score": 21.837228,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.00",
+          "score": 15.00017,
+          "link_id": "network",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "03.04",
+          "score": 11.244406,
+          "link_id": "network",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "Equipment",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "02.00",
+          "score": 8.330892,
+          "link_id": "equipment",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "02.02",
+          "score": 7.773055,
+          "link_id": "equipment",
+          "action_affordance": "view"
+        },
+        {
+          "page_id": "02.05",
+          "score": 1.714857,
+          "link_id": "equipment",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "my bill",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "10.00",
+          "score": 11.289305,
+          "link_id": "my-verizon-app",
+          "action_affordance": "navigate"
+        },
+        {
+          "page_id": "06.00",
+          "score": 3.401455,
+          "link_id": "tab-more",
+          "action_affordance": "navigate"
+        },
+        {
+          "page_id": "05.00",
+          "score": 3.156237,
+          "link_id": "tab-discover",
+          "action_affordance": "view"
+        }
+      ]
+    },
+    {
+      "query": "add a line",
+      "history": [],
+      "top3": [
+        {
+          "page_id": "10.00",
+          "score": 13.440614,
+          "link_id": "my-verizon-app",
+          "action_affordance": "navigate"
+        },
+        {
+          "page_id": "13.02",
+          "score": 10.415808,
+          "link_id": "home",
+          "action_affordance": "tool_action"
+        },
+        {
+          "page_id": "13.08",
+          "score": 4.438526,
+          "link_id": "home",
+          "action_affordance": "tool_action"
+        }
+      ]
+    }
+  ]
+}

@@ -29,10 +29,11 @@ struct TelcoTriageApp: App {
 /// One-stop dependency graph for the app. Constructed once at launch and
 /// threaded through views via `@EnvironmentObject`.
 ///
-/// All on-device: no cloud escalator, no packet builder. When model files are
-/// bundled, the app uses the LFM2.5-350M base plus telco LoRA adapters. When
-/// model files are absent, the app enters a degraded cookbook mode so unit
-/// tests and source exploration still work before users download GGUFs.
+/// All on-device: no cloud escalator, no packet builder, no keyword
+/// fallback classifiers. The base LFM2.5-350M GGUF + two LoRA adapters
+/// are required — if any are missing, `AppState.init` traps with a
+/// descriptive message (rather than silently degrading the demo to
+/// heuristics).
 /// Controls what the UI surfaces to the viewer.
 ///
 /// `.customer` — iMessage-clean chat: no trace rows, no confidence
@@ -59,7 +60,6 @@ final class AppState: ObservableObject {
 
     // Brand
     @Published var brands: BrandRegistry
-    @Published var isModelWarming: Bool = false
 
     // Data / retrieval
     let knowledgeBase: KnowledgeBase
@@ -87,14 +87,41 @@ final class AppState: ObservableObject {
     // Contextual support intelligence
     let supportSignalEngine: SupportSignalEngine
 
-    // Intelligence layer. The telco decision engine is the preferred
-    // ADR-014-shaped path: one multi-head understanding pass, then a
-    // pure router. The individual protocols remain available for the
-    // generative fallback path when classifier artifacts are absent.
-    let decisionEngine: (any TelcoDecisionEngine)?
+    // Intelligence layer. The normal Liquid Telco path is the
+    // composer dispatcher; ChatModeRouter remains injectable for
+    // legacy/degraded builds and explicit experiments only.
     let chatModeRouter: ChatModeRouter
     let kbExtractor: KBExtractor
     let toolSelector: ToolSelector
+
+    // Liquid Telco composer dispatcher. When the canonical RAG unit
+    // corpus is bundled, this owns the normal support answer path.
+    // Stage A, relational, and Stage B are optional experiment surfaces,
+    // not dependencies of customer/demo Q&A.
+    let verizonDispatcher: VerizonChatDispatcher?
+
+    /// ADR-022 §4.3 Layer 1 — produces a `QueryUnderstanding` vector
+    /// per turn. Picks `SharedBackboneStrategy` when the v2 shared
+    /// adapter + at least one head are bundled, otherwise falls back
+    /// to `CompositeFallbackStrategy` (today's PR #30 path of
+    /// `LFMChatModeRouter` + `VerizonStageAClassifier`).
+    /// `UnavailableStrategy` covers degraded builds where neither
+    /// path is bundled.
+    let queryUnderstandingClassifier: QueryUnderstandingClassifying
+
+    /// ADR-024 Phase δ: generative turn-relationship relational strategy.
+    /// `ChatTemplateRelationalStrategy.bundled(backend:)` returns non-nil
+    /// when `telco-relational-v1.gguf` is present (shipped in Phase δ).
+    /// Falls back to `UnavailableRelationalStrategy` in degraded builds
+    /// so every downstream caller can unconditionally call `.classifyFromText`.
+    let relationalStrategy: RelationalHeadsStrategy
+
+    /// Boot-time load status of the composer RAG path. Surfaced by
+    /// `RAGStatusChip` in engineering mode so the operator can see
+    /// whether the corpus, retriever, and composer are live. Set once
+    /// at init and never mutated thereafter — it's a deterministic boot
+    /// result, not session state.
+    let ragStatus: RAGStackStatus
 
     // Tool execution + LFM confirmation summary
     let toolExecutor: ToolExecutor
@@ -158,30 +185,24 @@ final class AppState: ObservableObject {
 
         self.brands = BrandRegistry()
 
-        // Intelligence + chat stack. The adapter-backed tool selector
-        // and the base-GGUF chat mode router + KB extractor + chat
-        // provider all share one LlamaBackend instance; the adapter
-        // cache keeps swap cost sub-millisecond.
+        // Intelligence + chat stack. The composer dispatcher is the
+        // normal support path; the shared LlamaBackend remains loaded
+        // for explicit tool execution, profile summaries, and opt-in
+        // legacy experiments.
         let stack = Self.buildLFMStack(kb: kb)
         self.llamaBackend = stack.backend
-        self.decisionEngine = stack.decisionEngine
         self.chatModeRouter = stack.chatModeRouter
         self.kbExtractor = stack.kbExtractor
         self.toolSelector = stack.tool
         self.modelProvider = stack.chat
         self.toolExecutor = ToolExecutor(chatProvider: stack.chat)
-        if let warmup = stack.warmup {
-            isModelWarming = true
-            #if targetEnvironment(simulator)
-            let warmupPriority: TaskPriority = .utility
-            #else
-            let warmupPriority: TaskPriority = .userInitiated
-            #endif
-            Task(priority: warmupPriority) { [weak self] in
-                await warmup()
-                self?.isModelWarming = false
-            }
-        }
+        self.verizonDispatcher = stack.verizonDispatcher
+        self.queryUnderstandingClassifier = stack.queryUnderstandingClassifier
+        self.relationalStrategy = stack.relationalStrategy
+        self.ragStatus = stack.ragStatus
+        AppLog.lfm.info(
+            "boot rag-status: \(stack.ragStatus.summary, privacy: .public)"
+        )
 
         // Bridge nested ObservableObjects up to AppState. `ChatView` and
         // friends observe `appState` via `@EnvironmentObject`; without
@@ -196,39 +217,23 @@ final class AppState: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
-    /// Constructs the LFM stack. Full model mode requires the base GGUF and
-    /// adapters copied by `bootstrap-models.sh`. If those artifacts are absent,
-    /// return a degraded stack instead of crashing; this keeps cookbook tests
-    /// runnable on a fresh clone where large GGUFs are intentionally omitted.
+    /// Constructs the LFM stack. Fails fast with a clear message if the
+    /// base model GGUF or tool-selector adapter GGUF is missing — this
+    /// is a pitch demo, we want to know immediately that the bundle is
+    /// wrong, not silently ship keyword heuristics.
     ///
     /// The intent-router adapter is removed from the bundle (2026-04-20).
     /// ChatModeRouter replaced its gating role; ToolSelector handles
     /// tool_action queries directly without an intermediate intent step.
     private static func buildLFMStack(kb: KnowledgeBase) -> LFMStack {
-        // Simulator audio is a real-time Mac HAL path. Leaving a couple of
-        // cores idle prevents llama.cpp CPU inference from starving mic I/O.
-        #if targetEnvironment(simulator)
-        let backend = LlamaBackend(threadCount: 4)
-        #else
-        let backend = LlamaBackend()
-        #endif
         guard let basePath = TelcoModelBundle.basePath(),
-              let toolAdapter = TelcoModelBundle.toolAdapterPath(),
-              let chatModeRouterAdapter = TelcoModelBundle.chatModeRouterAdapterPath(),
-              let kbExtractorAdapter = TelcoModelBundle.kbExtractorAdapterPath()
+              let toolAdapter = TelcoModelBundle.toolAdapterPath()
         else {
-            AppLog.lfm.warning("Missing LFM GGUFs in bundle - running degraded cookbook stack. Run bootstrap-models.sh for real on-device inference.")
-            let missingBackend = MissingModelBackend()
-            return LFMStack(
-                backend: backend,
-                decisionEngine: nil,
-                chatModeRouter: LFMChatModeRouter(backend: missingBackend, adapterPath: ""),
-                kbExtractor: KeywordKBExtractor(),
-                tool: LFMToolSelector(backend: missingBackend, adapterPath: ""),
-                chat: LFMChatProvider(backend: missingBackend),
-                warmup: nil
-            )
+            fatalError("Missing required LFM GGUFs in bundle. Expected \(TelcoModelBundle.baseModelName) and \(TelcoModelBundle.toolAdapterName) under Resources/Models/. See bootstrap-models.sh.")
         }
+        let chatModeRouterAdapter = TelcoModelBundle.chatModeRouterAdapterPath()
+
+        let backend = LlamaBackend()
 
         // iOS Simulator reports 0 MiB free on MTL0 — requesting GPU
         // offload there silently produces garbage (every sampled token
@@ -241,86 +246,13 @@ final class AppState: ObservableObject {
         gpuLayers = 99
         #endif
 
-        // Try to load classifier heads. Prefer the shared telco adapter
-        // (`telco-shared-clf-v1`) when present; otherwise use the
-        // existing paired classification adapters in one decision-engine
-        // wrapper. The paired path is slower, but still correct because
-        // each head sees the hidden-state distribution it was trained on.
-        var decisionEngine: (any TelcoDecisionEngine)?
-        var classifier: TelcoMultiHeadClassifier?
-        var classifierBridge: ClassifierBackedBridge?
-
-        if TelcoModelBundle.classifierHeadsBundled(),
-           TelcoModelBundle.classifierStackBundled() {
-            do {
-                let chatModePaths = TelcoModelBundle.classifierHeadPaths(task: "chat-mode")!
-                let kbExtractPaths = TelcoModelBundle.classifierHeadPaths(task: "kb-extract")!
-                let toolPaths = TelcoModelBundle.classifierHeadPaths(task: "tool-selector")!
-
-                let chatModeHead = try ClassifierHead(
-                    weightsURL: chatModePaths.weightsURL,
-                    biasURL: chatModePaths.biasURL,
-                    metaURL: chatModePaths.metaURL
-                )
-                let kbEntryHead = try ClassifierHead(
-                    weightsURL: kbExtractPaths.weightsURL,
-                    biasURL: kbExtractPaths.biasURL,
-                    metaURL: kbExtractPaths.metaURL
-                )
-                let toolHead = try ClassifierHead(
-                    weightsURL: toolPaths.weightsURL,
-                    biasURL: toolPaths.biasURL,
-                    metaURL: toolPaths.metaURL
-                )
-
-                // ADR-015 Phase-2 9-head inventory — only loaded when the
-                // shared adapter + all 9 head bundles are present.
-                let adr015Heads = Self.tryLoadADR015Heads()
-
-                let loadedClassifier = TelcoMultiHeadClassifier(
-                    backend: backend,
-                    heads: TelcoMultiHeadClassifier.HeadInventory(
-                        chatModeHead: chatModeHead,
-                        kbEntryHead: kbEntryHead,
-                        toolHead: toolHead,
-                        adr015: adr015Heads
-                    ),
-                    adapters: TelcoMultiHeadClassifier.AdapterInventory(
-                        sharedAdapterPath: TelcoModelBundle.sharedClfAdapterPath(),
-                        chatModeAdapterPath: TelcoModelBundle.chatModeClfAdapterPath(),
-                        kbExtractAdapterPath: TelcoModelBundle.kbExtractClfAdapterPath(),
-                        toolSelectorAdapterPath: TelcoModelBundle.toolSelectorClfAdapterPath()
-                    )
-                )
-                classifier = loadedClassifier
-                decisionEngine = MultiHeadTelcoDecisionEngine(classifier: loadedClassifier)
-                if let chatModeAdapterPath = TelcoModelBundle.chatModeClfAdapterPath(),
-                   let kbExtractAdapterPath = TelcoModelBundle.kbExtractClfAdapterPath(),
-                   let toolSelectorAdapterPath = TelcoModelBundle.toolSelectorClfAdapterPath() {
-                    classifierBridge = ClassifierBackedBridge(
-                        backend: backend,
-                        chatModeHead: chatModeHead,
-                        kbEntryHead: kbEntryHead,
-                        toolHead: toolHead,
-                        chatModeClfAdapterPath: chatModeAdapterPath,
-                        kbExtractClfAdapterPath: kbExtractAdapterPath,
-                        toolSelectorClfAdapterPath: toolSelectorAdapterPath
-                    )
-                }
-                let adr015Status = adr015Heads != nil ? "9 ADR-015 heads loaded" : "ADR-015 heads absent"
-                AppLog.lfm.info("Telco decision engine loaded: chat-mode (\(chatModeHead.numClasses)-way), kb-extract (\(kbEntryHead.numClasses)-way), tool-selector (\(toolHead.numClasses)-way), mode=\(loadedClassifier.inferenceMode.rawValue, privacy: .public), \(adr015Status, privacy: .public)")
-            } catch {
-                AppLog.lfm.error("Failed to load classifier stack, falling back to generative LoRA: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-
-        // LoRA adapters are still loaded for the chat provider (base-model
-        // generative responses) even when classifier heads handle
-        // classification. AppState schedules this warmup after its published
-        // model-loading state is initialized so the voice UI can avoid racing
-        // audio capture against a CPU-heavy llama.cpp graph reservation.
-        let classifierForWarmup = classifier
-        let warmup: @Sendable () async -> Void = {
+        // Kick the model load off the main thread. The normal Liquid
+        // Telco composer path is zero-generation, so boot must not
+        // pre-warm the old composite understanding adapters. Loading
+        // those LoRAs at startup makes the customer/demo path look like
+        // it depends on chat-mode-router / Stage A even when it does not.
+        // Keep only the tool adapter warm for explicit tool execution.
+        Task.detached(priority: .userInitiated) {
             do {
                 try await backend.loadModel(
                     path: basePath,
@@ -328,29 +260,7 @@ final class AppState: ObservableObject {
                     gpuLayers: gpuLayers,
                     temperature: 0
                 )
-                // Warm generative LoRA adapter caches. These remain
-                // loaded for the chat provider and as generative fallback.
                 try await backend.setAdapter(path: toolAdapter)
-                try await backend.setAdapter(path: chatModeRouterAdapter)
-                try await backend.setAdapter(path: kbExtractorAdapter)
-
-                // Pre-warm classification LoRA adapters if the multi-head
-                // decision engine is active.
-                if classifierForWarmup != nil {
-                    if let shared = TelcoModelBundle.sharedClfAdapterPath() {
-                        try await backend.setAdapter(path: shared)
-                    } else {
-                        if let p = TelcoModelBundle.chatModeClfAdapterPath() {
-                            try await backend.setAdapter(path: p)
-                        }
-                        if let p = TelcoModelBundle.kbExtractClfAdapterPath() {
-                            try await backend.setAdapter(path: p)
-                        }
-                        if let p = TelcoModelBundle.toolSelectorClfAdapterPath() {
-                            try await backend.setAdapter(path: p)
-                        }
-                    }
-                }
             } catch {
                 AppLog.lfm.error("base model load failed: \(error.localizedDescription, privacy: .public)")
             }
@@ -358,6 +268,66 @@ final class AppState: ObservableObject {
 
         let bridge = LlamaAdapterBackend(backend: backend)
         let chat = LFMChatProvider(backend: bridge)
+
+        // Liquid Telco composer dispatcher. Built when the Stage A
+        // router artifacts are bundled; the composer corpus/retriever
+        // decide whether the answer path is live or degraded. Stage B
+        // and ColBERT are legacy/evaluation-only surfaces.
+        var verizonDispatcher: VerizonChatDispatcher?
+        var ragStatus: RAGStackStatus = .notInitialized
+        // Step 6: composer-path dependencies. The composer is the only
+        // normal answer path per the Step 5 decision record. Loaded
+        // independently of Stage B so the dispatcher can take the
+        // composer path even when (post-6.6) the Stage B GGUF is no
+        // longer bundled. These are tiny (~150 KB JSON + pure Swift)
+        // and never fail to load on a healthy build.
+        let composerCorpus: RAGUnitCorpus?
+        do {
+            composerCorpus = try RAGUnitCorpus.loadFromBundle()
+            AppLog.lfm.info("RAGUnitCorpus loaded with \(composerCorpus?.count ?? 0, privacy: .public) units")
+        } catch {
+            composerCorpus = nil
+            AppLog.lfm.error("RAGUnitCorpus load failed: \(error.localizedDescription, privacy: .public)")
+        }
+        let composerRetriever: BM25HierarchyRetriever? = composerCorpus.map { BM25HierarchyRetriever(corpus: $0) }
+        let answerComposer: AnswerComposing = DeterministicAnswerComposer()
+        // The dispatcher only uses this registry as a LOOKUP TABLE —
+        // it asks `tool(for: ToolIntent.xxx) != nil` to decide whether
+        // a query should route to `.toolAction` (guardrail #3). It
+        // never executes a tool — execution stays on the ChatViewModel
+        // path through AppState.toolRegistry + ToolExecutor. So the
+        // CustomerContext baked into this registry is irrelevant; a
+        // fresh one is fine.
+        let composerToolRegistry = ToolRegistry.default(customerContext: CustomerContext())
+        // Step 5b Pre-flight Fix A: link_id → ToolIntent alias map.
+        // Resolves the corpus/registry vocabulary gap (e.g.
+        // link_id="speed-test" → tool "run-speed-test") AND the
+        // imperative-only parental-controls carve-out. Mirrors the
+        // Python harness so Swift dispatcher behaviour matches the
+        // acceptance gates byte-for-byte.
+        let composerToolAliasMap = ToolAliasMap.default()
+
+        let composerWired = composerCorpus != nil && composerRetriever != nil
+        if let cc = composerCorpus, composerWired {
+            ragStatus = .live(chunkCount: cc.count, embedDim: 0)
+            AppLog.lfm.info("Liquid Telco dispatcher ready (composer-only path, \(cc.count, privacy: .public) RAG units)")
+            verizonDispatcher = VerizonChatDispatcher(
+                stageA: nil,
+                stageB: nil,
+                kbFallback: KeywordKBExtractor(),
+                kb: kb.entries,
+                retriever: nil,
+                modelHost: nil,
+                composer: answerComposer,
+                corpus: cc,
+                lexicalRetriever: composerRetriever,
+                toolRegistry: composerToolRegistry,
+                toolAliasMap: composerToolAliasMap
+            )
+        } else {
+            ragStatus = .degraded(reason: "RAGUnitCorpus failed to load")
+            AppLog.lfm.error("Liquid Telco composer dispatcher unavailable — RAGUnitCorpus failed to load")
+        }
 
         // KB selection: deterministic keyword/alias matching. The KB
         // has hand-curated aliases ("pause internet", "ssid", "block
@@ -373,107 +343,219 @@ final class AppState: ObservableObject {
         //     fallback for paraphrase. We mirror that here — keyword
         //     is the primary, with zero ML-component coupling.
         let kbExtractor = KeywordKBExtractor()
-        let chatModeRouter: ChatModeRouter
-        let toolSelector: ToolSelector
-        if let classifierBridge {
-            chatModeRouter = ClassifierChatModeRouter(bridge: classifierBridge)
-            toolSelector = ClassifierToolSelector(bridge: classifierBridge)
-            AppLog.lfm.info("Fast classifier-backed chat router and tool selector enabled")
+
+        let chatModeRouterForStack: ChatModeRouter
+        let queryUnderstandingClassifier: QueryUnderstandingClassifying
+        if verizonDispatcher != nil {
+            chatModeRouterForStack = StubChatModeRouter(
+                mode: .kbQuestion,
+                confidence: 1.0,
+                reasoning: "disabled on composer runtime path"
+            )
+            queryUnderstandingClassifier = QueryUnderstandingClassifier(strategy: UnavailableStrategy())
+            AppLog.lfm.info("understanding layer disabled for composer runtime path")
         } else {
-            chatModeRouter = LFMChatModeRouter(backend: bridge, adapterPath: chatModeRouterAdapter)
-            toolSelector = LFMToolSelector(backend: bridge, adapterPath: toolAdapter)
-            AppLog.lfm.warning("Classifier-backed chat/tool primitives unavailable - using generative routing fallback")
+            // Legacy/degraded path only: pick the best available
+            // understanding classifier when the composer dispatcher is
+            // unavailable. This keeps the old stack as a fallback, but
+            // prevents it from participating in the normal demo path.
+            if let chatModeRouterAdapter {
+                let liveChatModeRouter = LFMChatModeRouter(
+                    backend: bridge,
+                    adapterPath: chatModeRouterAdapter
+                )
+                chatModeRouterForStack = liveChatModeRouter
+                let stageAForUnderstanding: VerizonStageAClassifying? =
+                    (try? VerizonStageAClassifier.bundled(backend: backend))
+                queryUnderstandingClassifier = QueryUnderstandingClassifier.bundled(
+                    backend: backend,
+                    chatModeRouter: liveChatModeRouter,
+                    stageA: stageAForUnderstanding
+                )
+                AppLog.lfm.info(
+                    "understanding layer ready for legacy fallback (target strategy = \(TelcoModelBundle.understandingV2Bundled() ? "shared(v2)" : "composite(v1)", privacy: .public))"
+                )
+            } else {
+                chatModeRouterForStack = StubChatModeRouter(
+                    mode: .outOfScope,
+                    confidence: 0.0,
+                    reasoning: "legacy chat-mode router adapter is not bundled"
+                )
+                queryUnderstandingClassifier = QueryUnderstandingClassifier(strategy: UnavailableStrategy())
+                AppLog.lfm.warning(
+                    "understanding layer unavailable for legacy fallback: \(TelcoModelBundle.chatModeRouterAdapterName, privacy: .public) not bundled"
+                )
+            }
         }
+
+        // ADR-024 Phase δ: generative relational strategy. Non-nil when
+        // telco-relational-v1.gguf is present (ships Phase δ). Degrades
+        // gracefully to UnavailableRelationalStrategy so ChatViewModel
+        // can call it unconditionally without guarding on bundle state.
+        let relationalStrategy: RelationalHeadsStrategy = UnavailableRelationalStrategy()
+        AppLog.lfm.info(
+            "relational strategy: Unavailable(composer runtime bypasses relational LoRA)"
+        )
 
         return LFMStack(
             backend: backend,
-            decisionEngine: decisionEngine,
-            chatModeRouter: chatModeRouter,
+            chatModeRouter: chatModeRouterForStack,
             kbExtractor: kbExtractor,
-            tool: toolSelector,
+            tool: LFMToolSelector(backend: bridge, adapterPath: toolAdapter),
             chat: chat,
-            warmup: warmup
+            verizonDispatcher: verizonDispatcher,
+            queryUnderstandingClassifier: queryUnderstandingClassifier,
+            ragStatus: ragStatus,
+            relationalStrategy: relationalStrategy
         )
     }
 
-    /// Loads the 9 ADR-015 telco heads if the shared adapter + all head
-    /// triplets are present. Returns nil if any artifact is missing or
-    /// fails to load — the classifier still runs the Phase-1 triad.
-    private static func tryLoadADR015Heads() -> TelcoMultiHeadClassifier.ADR015HeadInventory? {
-        guard TelcoModelBundle.adr015TelcoStackBundled() else {
-            AppLog.lfm.info("ADR-015 telco stack not bundled — using Phase-1 triad only")
-            return nil
-        }
+    /// ADR-021 §11.4.3 + §11.5: instantiate the ColBERT retriever and
+    /// the SwappingModelHost that owns the chat ↔ ColBERT backbone
+    /// transitions. Also runs the boot-time corpus drift gate (§11.5 L4)
+    /// — mismatch logs loudly via os_log so engineering mode surfaces
+    /// the failure mode without dropping the user into a silent path.
+    ///
+    /// Returns (nil, nil) when any artifact is missing — the dispatcher
+    /// then runs in degraded mode (Stage B without grounding). Logs
+    /// every missing artifact loudly.
+    ///
+    /// **2026-05-27 — Short-circuited.** Per ADR-025 + the memory-diet
+    /// retreat, ColBERT artifacts no longer ship in the bundle. This
+    /// function returns the degraded sentinel immediately so boot
+    /// doesn't waste time hunting for missing files. The dispatcher's
+    /// normal answer path now uses BM25HierarchyRetriever plus the
+    /// deterministic composer; ColBERT is retained only as a dormant
+    /// revival path.
+    ///
+    /// To re-enable: ship the ColBERT GGUF + index files in the bundle
+    /// again and delete this short-circuit. Or move to the ADR-025
+    /// LoRA-adapter ColBERT path (preferred).
+    private static func tryLoadColBERTStack(
+        backend: LlamaBackend,
+        basePath: String,
+        gpuLayers: Int32
+    ) -> (ColBERTRetriever?, SwappingModelHost?, RAGStackStatus) {
+        // ADR-025 retreat — return immediately. The composer retriever is the
+        // production path now; this legacy ColBERT retriever remains nil.
+        let reason = "ColBERT removed from bundle (memory diet, 2026-05-27). " +
+                     "BM25HierarchyRetriever + deterministic composer is the " +
+                     "normal answer path. See ADR-025 for any future " +
+                     "LoRA-adapter ColBERT revival."
+        AppLog.lfm.info("Legacy ColBERT stack: \(reason, privacy: .public)")
+        return (nil, nil, .degraded(reason: reason))
 
+        // swiftlint:disable:next line_length
+        // -- Original ColBERT-loading body retained below for revival, never executes --
+        #if false
+        // 1) Boot-time corpus drift gate — runs even if retrieval
+        // can't be wired, so engineering mode surfaces the drift.
         do {
-            func head(_ task: String) throws -> ClassifierHead {
-                guard let p = TelcoModelBundle.classifierHeadPaths(task: task) else {
-                    throw NSError(
-                        domain: "TelcoModelBundle",
-                        code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "head missing: \(task)"]
-                    )
-                }
-                return try ClassifierHead(
-                    weightsURL: p.weightsURL,
-                    biasURL: p.biasURL,
-                    metaURL: p.metaURL
+            let manifest = try CorpusManifest.bundled()
+            if !manifest.matches {
+                AppLog.lfm.warning(
+                    "RAG corpus drift detected at boot. Stage B was trained against a different rag-chunks-v1.json. Retrieval still wires but Stage B's grounded-generation quality may degrade — faithfulness gates carry the safety burden."
                 )
             }
-
-            return try TelcoMultiHeadClassifier.ADR015HeadInventory(
-                supportIntent: head("telco-support-intent"),
-                issueComplexity: head("telco-issue-complexity"),
-                routingLane: head("telco-routing-lane"),
-                cloudRequirements: head("telco-cloud-requirements"),
-                requiredTool: head("telco-required-tool"),
-                customerEscalationRisk: head("telco-customer-escalation-risk"),
-                piiRisk: head("telco-pii-risk"),
-                transcriptQuality: head("telco-transcript-quality"),
-                slotCompleteness: head("telco-slot-completeness")
-            )
         } catch {
-            AppLog.lfm.error("ADR-015 head load failed: \(error.localizedDescription, privacy: .public)")
-            return nil
+            AppLog.lfm.info(
+                "RAG corpus manifest not present (\(error.localizedDescription, privacy: .public)) — skipping drift gate"
+            )
         }
+
+        // 2) Load ColBERT primitives. All three artifacts must be
+        // present or the retrieval path stays nil (dispatcher will
+        // run ungrounded Stage B + log the missing-signal warning).
+        // The status reason on failure carries the exact missing
+        // artifact name so the operator's tap-to-diagnose chip can
+        // point them at the right fix without needing Console.app.
+        let index: ColBERTIndex
+        let projection: ColBERTProjection
+        do {
+            index = try ColBERTIndex.bundled()
+        } catch {
+            let reason = "rag-index-v1.bin/rag-chunks-v1.json load failed: \(error.localizedDescription)"
+            AppLog.lfm.warning(
+                "\(reason, privacy: .public). Dispatcher will run Stage B without grounding (F1/F3/F5 active per ADR §11.1)."
+            )
+            return (nil, nil, .degraded(reason: reason))
+        }
+        do {
+            projection = try ColBERTProjection.bundled()
+        } catch {
+            let reason = "colbert-projection-v1.bin load failed: \(error.localizedDescription)"
+            AppLog.lfm.warning(
+                "\(reason, privacy: .public). Dispatcher will run Stage B without grounding (F1/F3/F5 active per ADR §11.1)."
+            )
+            return (nil, nil, .degraded(reason: reason))
+        }
+
+        guard let colbertPath = bundle.path(
+            forResource: "lfm2-colbert-350m-Q4_K_M",
+            ofType: "gguf"
+        ) else {
+            let reason = "lfm2-colbert-350m-Q4_K_M.gguf missing from bundle — run bootstrap-models.sh"
+            AppLog.lfm.warning("\(reason, privacy: .public)")
+            return (nil, nil, .degraded(reason: reason))
+        }
+
+        let retriever = ColBERTRetriever(
+            index: index,
+            projection: projection,
+            topK: 5
+        )
+
+        // 3) Build the model host. Chat backbone config matches the
+        // boot loadModel call below (same path, same params); ColBERT
+        // config picks 2048 ctx (queries are short, no need for 8K).
+        let chatConfig = LlamaBackendModeConfig(
+            path: basePath,
+            contextLength: 8192,
+            gpuLayers: gpuLayers
+        )
+        let colbertConfig = LlamaBackendModeConfig(
+            path: colbertPath,
+            contextLength: 2048,
+            gpuLayers: gpuLayers
+        )
+        let host = SwappingModelHost(
+            backend: backend,
+            chatConfig: chatConfig,
+            colbertConfig: colbertConfig
+        )
+
+        // The detached task below loadModels the chat backbone first.
+        // Tell the host so its first .ensureMode(.chat) is a no-op
+        // (otherwise it'd try to unload-then-reload).
+        Task { await host.setInitialMode(.chat) }
+
+        AppLog.lfm.info(
+            "ColBERT stack loaded: index=\(index.count, privacy: .public) chunks, dim=\(index.embedDim, privacy: .public), modelHost ready"
+        )
+        return (
+            retriever,
+            host,
+            .live(chunkCount: index.count, embedDim: index.embedDim)
+        )
+        #endif
     }
 
+    /// Bundle accessor used by `tryLoadColBERTStack`. Always returns
+    /// .main since this is the app's main bundle path lookup.
+    private static var bundle: Bundle { .main }
+
     /// Bundle of every LFM primitive built by `buildLFMStack`. A named
-    /// struct is clearer than a 5-tuple — field reordering on the call
+    /// struct is clearer than a tuple — field reordering on the call
     /// site would be silent breakage with tuples.
     private struct LFMStack {
         let backend: LlamaBackend
-        let decisionEngine: (any TelcoDecisionEngine)?
         let chatModeRouter: ChatModeRouter
         let kbExtractor: KBExtractor
         let tool: ToolSelector
         let chat: LFMChatProvider
-        let warmup: (@Sendable () async -> Void)?
-    }
-
-    private struct MissingModelBackend: AdapterInferenceBackend {
-        func generate(
-            messages: [AdapterChatMessage],
-            adapterPath: String,
-            maxTokens: Int,
-            stopSequences: [String]
-        ) async throws -> String {
-            throw MissingModelError()
-        }
-
-        func generate(
-            prompt: String,
-            adapterPath: String,
-            maxTokens: Int,
-            stopSequences: [String]
-        ) async throws -> String {
-            "Model artifacts are not bundled. Run bootstrap-models.sh, then regenerate the Xcode project to enable real on-device LFM inference."
-        }
-    }
-
-    private struct MissingModelError: LocalizedError {
-        var errorDescription: String? {
-            "Model artifacts are not bundled. Run bootstrap-models.sh."
-        }
+        let verizonDispatcher: VerizonChatDispatcher?
+        let queryUnderstandingClassifier: QueryUnderstandingClassifying
+        let ragStatus: RAGStackStatus
+        let relationalStrategy: RelationalHeadsStrategy
     }
 }

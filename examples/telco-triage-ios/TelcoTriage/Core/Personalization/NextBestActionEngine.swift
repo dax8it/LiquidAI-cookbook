@@ -53,6 +53,45 @@ public final class NextBestActionEngine: ObservableObject {
         }
     }
 
+    /// ADR-022 §4.3 Layer 4 — find the single best NBA whose
+    /// `matchesUnderstanding` hook fires for the given vector. Takes
+    /// precedence over the keyword path: a frustration signal beats
+    /// a keyword overlap. Scoring follows the standard
+    /// `priorityScore(for:)` descending order so escalation outranks
+    /// slot clarification (priority 0.95 vs 0.90).
+    ///
+    /// **ADR-023 Phase 2**: the optional `conversation` parameter lets
+    /// session-scoped signals (live-agent / "didn't work" counters)
+    /// fire the escalation chip even when the trained `emotional_state`
+    /// head is silent. NBAs that don't care leave the default (false).
+    ///
+    /// Pure dispatch — no state mutation. Returns nil when no NBA
+    /// matches; the caller falls back to `bestMatchForChat(query:)`
+    /// or attaches no card.
+    public func bestMatchForUnderstanding(
+        _ understanding: QueryUnderstanding,
+        lane: UnderstandingLane,
+        toolIntent: ToolIntent?,
+        conversation: ConversationSnapshot? = nil
+    ) -> (any NextBestAction)? {
+        let profile = customerContext.profile
+        // Use the full registry (not just `topActions`) — understanding-
+        // driven NBAs are typically not in `topActions` because they
+        // depend on per-turn signal, not profile state. Filter by
+        // `isEligible` so profile-level gates still apply.
+        return registry.all
+            .filter { $0.isEligible(for: profile) }
+            .filter {
+                $0.matchesUnderstanding(
+                    understanding,
+                    lane: lane,
+                    toolIntent: toolIntent,
+                    conversation: conversation
+                )
+            }
+            .max(by: { $0.priorityScore(for: profile) < $1.priorityScore(for: profile) })
+    }
+
     public func record(outcome: NBAOutcome) {
         outcomes.append(outcome)
     }
@@ -116,6 +155,12 @@ public final class NextBestActionRegistry: Sendable {
         TravelPassBoltOnNBA(),
         SlowSpeedRetentionNBA(),
         ExtenderProactiveSupportNBA(),
+        // ADR-022 §4.3 Layer 4 — understanding-aware NBAs.
+        // Dormant until the `emotional_state` / `slot_completeness`
+        // heads ship in `telco-shared-clf-v2`; the `matchesUnderstanding`
+        // hook returns false when the corresponding head output is nil.
+        EscalateOnFrustrationNBA(),
+        ClarifyMissingSlotNBA(),
     ])
 }
 

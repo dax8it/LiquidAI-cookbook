@@ -9,22 +9,56 @@ extension LlamaBackend {
 
     // MARK: - Sampler
 
-    /// Create or replace the sampler. Greedy for temperature <= 0, chain (temp + dist) otherwise.
-    /// Caches the sampler — skips recreation when temperature hasn't changed.
-    func applySampler(temperature: Float) {
+    /// Create or replace the sampler. Greedy for temperature <= 0, chain
+    /// (temp + dist) otherwise. When `grammar` is non-nil, a
+    /// `llama_sampler_init_grammar` is prepended to the chain so the
+    /// decoder enforces the GBNF constraint at every token — invalid
+    /// tokens are masked out before sampling. The grammar sampler's
+    /// state advances automatically via `llama_sampler_accept` because
+    /// it's part of the chain.
+    ///
+    /// **Caching rule**: with no grammar, the sampler is reused across
+    /// calls when temperature hasn't changed (perf win on the chat
+    /// hot-path). WITH a grammar, the sampler is always rebuilt — the
+    /// grammar parser carries position state from the previous decode
+    /// and cannot be replayed across prompts. Cheap to rebuild
+    /// (sub-millisecond on small grammars).
+    func applySampler(temperature: Float, grammar: String? = nil) {
         #if LLAMA_CPP_AVAILABLE
-        if sampler != nil && samplerTemperature == temperature { return }
+        let needsRebuild = sampler == nil
+            || samplerTemperature != temperature
+            || grammar != nil
+        if !needsRebuild { return }
 
         if let s = sampler { llama_sampler_free(s) }
 
-        if temperature <= 0 {
-            self.sampler = llama_sampler_init_greedy()
-        } else {
-            let chain = llama_sampler_chain_init(llama_sampler_chain_default_params())!
-            llama_sampler_chain_add(chain, llama_sampler_init_temp(temperature))
-            llama_sampler_chain_add(chain, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max)))
-            self.sampler = chain
+        let chain = llama_sampler_chain_init(llama_sampler_chain_default_params())!
+
+        // Grammar must be FIRST in the chain so its token mask is
+        // applied BEFORE temperature/dist sampling. Without grammar,
+        // we still wrap in a chain so the code path is uniform.
+        if let grammar, let model {
+            let vocab = llama_model_get_vocab(model)
+            grammar.withCString { gPtr in
+                "root".withCString { rPtr in
+                    if let grammarSampler = llama_sampler_init_grammar(vocab, gPtr, rPtr) {
+                        llama_sampler_chain_add(chain, grammarSampler)
+                    }
+                }
+            }
         }
+
+        if temperature <= 0 {
+            llama_sampler_chain_add(chain, llama_sampler_init_greedy())
+        } else {
+            llama_sampler_chain_add(chain, llama_sampler_init_temp(temperature))
+            llama_sampler_chain_add(
+                chain,
+                llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max))
+            )
+        }
+
+        self.sampler = chain
         samplerTemperature = temperature
         #endif
     }

@@ -63,7 +63,7 @@ public enum InferenceLocation: String, Sendable {
 
 /// How the engine should run inference.
 public enum InferenceMode: String, Sendable {
-    /// Call a remote inference backend via HTTP (rapid iteration).
+    /// Call H100 backend via HTTP (rapid iteration).
     case proxy
     /// Run llama.cpp on-device with Metal (production demo).
     case onDevice

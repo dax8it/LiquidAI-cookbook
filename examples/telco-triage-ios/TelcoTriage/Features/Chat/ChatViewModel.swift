@@ -28,31 +28,61 @@ final class ChatViewModel: ObservableObject {
     let customerContext: CustomerContext
     let nbaEngine: NextBestActionEngine
 
-    // Intelligence layer. `decisionEngine` is the preferred multi-head
-    // path; the three individual protocols are fallback primitives when
-    // classifier artifacts are absent.
-    let decisionEngine: (any TelcoDecisionEngine)?
+    // Intelligence layer. The Liquid Telco composer dispatcher owns the
+    // normal support Q&A path. ChatModeRouter and the unified
+    // understanding classifier remain injectable for degraded builds,
+    // explicit experiments, and non-composer features.
     let chatModeRouter: ChatModeRouter
     let kbExtractor: KBExtractor
     let queryExtractor: QueryExtractor
     let toolSelector: ToolSelector
 
+    /// Liquid Telco composer dispatcher. When non-nil, owns the normal
+    /// support answer path from explicit state + BM25HierarchyRetriever
+    /// evidence + deterministic composition. The legacy composite
+    /// understanding stack is bypassed unless this dispatcher is absent.
+    let verizonDispatcher: VerizonChatDispatcher?
+
+    /// ADR-022 §4.3 Layer 1 — the unified understanding classifier.
+    /// Always present (`UnavailableStrategy` covers degraded builds).
+    /// Replaces the bare `chatModeRouter.classify(query:)` call that
+    /// formerly opened `processTextQuery`; the resulting
+    /// `QueryUnderstanding` vector drives routing AND populates the
+    /// engineering trace card.
+    let understandingClassifier: QueryUnderstandingClassifying
+
+    /// ADR-024 Phase δ — pairwise relational classifier. Runs as a
+    /// second pass after Layer 1, consuming prior-turn text cached by
+    /// `recordTurnSideEffects`. When the `telco-relational-v1.gguf`
+    /// adapter is bundled this is a `ChatTemplateRelationalStrategy`;
+    /// otherwise it degrades to `UnavailableRelationalStrategy`, which
+    /// returns `.none` outcomes so the router stays on the single-turn
+    /// baseline. Always non-nil — no optional chaining needed.
+    let relationalStrategy: RelationalHeadsStrategy
+
+    /// Latest understanding vector for the current turn. Published so
+    /// the (future) engineering-mode trace view can render it live as
+    /// each stage completes. Reset on every new turn.
+    @Published var lastUnderstanding: QueryUnderstanding?
+
+    /// ADR-023 Phase 2 — session-scoped conversation state. Owns
+    /// pendingClarification, pendingToolConfirmation, and the
+    /// frustration counters. Lives for the chat session. Drives the
+    /// pre-classifier clarification recovery + the NBA layer's
+    /// counter-based escalation.
+    let conversationState: ConversationState
+
+    /// Latest Stage A + dispatcher result for the current turn. Captured
+    /// from the AsyncStream events so the engineering-mode trace UI can
+    /// render the new pipeline rows. Reset on every new turn.
+    @Published var lastVerizonStageA: VerizonStageADecision?
+    @Published var lastVerizonLane: VerizonLane?
+    @Published var lastVerizonStageBResponse: StageBResponse?
+    @Published var lastVerizonResult: VerizonDispatchResult?
+
     // Tool execution + result synthesis
     let toolExecutor: ToolExecutor
-    private let useFastGroundedQA: Bool
-
-    /// Deterministic off-topic gate. See `TelcoTopicGate` for rationale —
-    /// closed-domain vocabulary check, no LFM call, prevents
-    /// hallucinated answers to genuinely off-topic queries.
-    private let topicGate = TelcoTopicGate()
-
-    /// Captured per-turn from `decisionEngine.decide(...)` so the
-    /// engineering-mode pipeline trace card can render all 9 ADR-015
-    /// head outputs + lane decision. `nil` until the first turn or when
-    /// the multi-head stack isn't loaded. `internal` so the +Vision
-    /// extension in a sibling file can clear it before a vision turn.
-    var lastTelcoVector: TelcoDecisionVector?
-    var lastTelcoLane: TelcoLaneDecision?
+    private let useSimulatorFastGroundedQA: Bool
 
     /// Per-message pipeline-card expand state. Lifted out of the card's
     /// `@State` because `LazyVStack` recycles cells aggressively — local
@@ -80,48 +110,12 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Build the current turn's pipeline trace, if the multi-head stack
-    /// produced one. Each CallTrace construction site forwards this so
-    /// the engineering-mode pipeline card can render all 9 head outputs
-    /// + lane decision under the assistant bubble.
-    func currentTelcoPipelineTrace(
-        totalLatencyMS: Int? = nil,
-        downstreamStep: TelcoPipelineTrace.Step? = nil,
-        answerSummary: String? = nil,
-        target: String? = nil,
-        laneLabel: String? = nil,
-        laneReason: String? = nil
-    ) -> TelcoPipelineTrace? {
-        guard let vector = lastTelcoVector else { return nil }
-        guard let trace = TelcoPipelineTrace.from(vector: vector, lane: lastTelcoLane) else {
-            return nil
-        }
-        guard totalLatencyMS != nil || downstreamStep != nil || answerSummary != nil
-                || target != nil || laneLabel != nil || laneReason != nil
-        else {
-            return trace
-        }
-        return trace.updatingRuntime(
-            totalLatencyMs: Double(totalLatencyMS ?? Int(trace.totalLatencyMs.rounded())),
-            downstreamStep: downstreamStep,
-            answerSummary: answerSummary,
-            target: target,
-            laneLabel: laneLabel,
-            laneReason: laneReason
-        )
-    }
-
-    private var telcoClassifierRuntimeMS: Int {
-        Int(lastTelcoVector?.totalMs.rounded() ?? 0)
-    }
-
     /// Resolves the current brand's welcome greeting at call time. Passed
     /// as a closure so a mid-session brand flip (via Settings) propagates
     /// without ChatViewModel needing to observe BrandRegistry.
     private let welcomeGreetingProvider: @MainActor () -> String
 
     init(
-        decisionEngine: (any TelcoDecisionEngine)? = nil,
         chatModeRouter: ChatModeRouter,
         kbExtractor: KBExtractor,
         provider: LFMChatProvider,
@@ -136,10 +130,13 @@ final class ChatViewModel: ObservableObject {
         queryExtractor: QueryExtractor = RegexQueryExtractor(),
         toolSelector: ToolSelector,
         toolExecutor: ToolExecutor,
-        useFastGroundedQA: Bool = ChatViewModel.shouldUseFastGroundedQA,
+        verizonDispatcher: VerizonChatDispatcher? = nil,
+        understandingClassifier: QueryUnderstandingClassifying? = nil,
+        relationalStrategy: RelationalHeadsStrategy? = nil,
+        conversationState: ConversationState? = nil,
+        useSimulatorFastGroundedQA: Bool = ChatViewModel.shouldUseSimulatorFastGroundedQA,
         welcomeGreetingProvider: @escaping @MainActor () -> String
     ) {
-        self.decisionEngine = decisionEngine
         self.chatModeRouter = chatModeRouter
         self.kbExtractor = kbExtractor
         self.provider = provider
@@ -154,7 +151,29 @@ final class ChatViewModel: ObservableObject {
         self.queryExtractor = queryExtractor
         self.toolSelector = toolSelector
         self.toolExecutor = toolExecutor
-        self.useFastGroundedQA = useFastGroundedQA
+        self.verizonDispatcher = verizonDispatcher
+        // ADR-022 §4.3 — fall back to a composite classifier wrapping
+        // the caller-supplied chatModeRouter when the host doesn't
+        // pre-build one (tests, integration harnesses). The composite
+        // degrades to chatMode-only when Stage A isn't reachable —
+        // same behaviour as PR #30.
+        self.understandingClassifier = understandingClassifier
+            ?? QueryUnderstandingClassifier(
+                strategy: CompositeFallbackStrategy(
+                    chatModeRouter: chatModeRouter,
+                    stageA: nil
+                )
+            )
+        // ADR-024 Phase δ — default to UnavailableRelationalStrategy when
+        // caller doesn't supply a live strategy (tests, integrations). The
+        // degraded path returns .none for all relational outputs and costs
+        // zero latency; routing falls through to the single-turn baseline.
+        self.relationalStrategy = relationalStrategy ?? UnavailableRelationalStrategy()
+        // ADR-023 Phase 2 — default to a fresh ConversationState so the
+        // session starts clean. Tests that want to pre-seed state (e.g.
+        // simulate a pending clarification) inject their own instance.
+        self.conversationState = conversationState ?? ConversationState()
+        self.useSimulatorFastGroundedQA = useSimulatorFastGroundedQA
         self.welcomeGreetingProvider = welcomeGreetingProvider
         seedWelcomeMessage()
     }
@@ -204,8 +223,6 @@ final class ChatViewModel: ObservableObject {
 
     func clear() {
         messages.removeAll()
-        lastTelcoVector = nil
-        lastTelcoLane = nil
         seedWelcomeMessage()
     }
 
@@ -248,12 +265,6 @@ final class ChatViewModel: ObservableObject {
     private func processTextQuery(query: String) async {
         isProcessing = true
         routingStage = .understanding
-        // Stale trace from the previous turn would render with this
-        // turn's bubble until the multi-head completes. Reset eagerly
-        // so a mid-turn read of `currentTelcoPipelineTrace()` returns
-        // nil rather than the previous query's vector.
-        lastTelcoVector = nil
-        lastTelcoLane = nil
         defer {
             isProcessing = false
             routingStage = nil
@@ -273,92 +284,349 @@ final class ChatViewModel: ObservableObject {
             sessionStats.recordPII(piiSpans.count)
         }
 
-        // 2) Deterministic topic gate. The 8-class support_intent
-        //    head has no out_of_scope class — every query lands on
-        //    one of the telco classes regardless. A vocabulary check
-        //    over the KB's own terms is faster, perfectly accurate
-        //    for this closed domain, and prevents the LFM from
-        //    hallucinating answers to "what is the weather" that
-        //    the classifier mistakenly tagged as `outage`.
-        let gate = topicGate.decide(query)
-        if case .outOfScope(let reason) = gate {
-            AppLog.intelligence.info("topic gate: out_of_scope (\(reason, privacy: .public)) — refusing without LFM call")
+        // ADR-023 Phase 2 — pre-classifier clarification recovery.
+        // When the previous assistant turn asked a clarification
+        // question (Verizon .clarification lane, or a tool-action turn
+        // with a missing required slot), the user's reply should be
+        // tested as the answer to that question BEFORE running the
+        // full understanding classifier. Two recovery paths:
+        //
+        //   (a) Pending tool confirmation + bare affirmative ("yes",
+        //       "go ahead") → fire the pending tool directly. The
+        //       confirmation button is still primary; this path
+        //       handles users who type the answer instead of tapping.
+        //
+        //   (b) Pending clarification with a known intent + missing
+        //       slot → use RegexQueryExtractor biased toward the
+        //       missing slot. If we lift a value, fire the intent
+        //       with combined args.
+        //
+        // On either success: clear pending and return. On failure:
+        // clear pending (the user changed topics) and fall through
+        // to normal classification. Mis-fires cost one turn of
+        // friction — missing the clarification entirely costs the
+        // whole flow.
+        if let pendingConfirmation = conversationState.pendingToolConfirmation,
+           ConversationStateRecorder.isBareAffirmative(query) {
+            AppLog.intelligence.info(
+                "pending-tool-confirmation recovered: \(pendingConfirmation.toolID, privacy: .public)"
+            )
+            conversationState.clearPendingToolConfirmation()
+            // Replay the original tool decision through runToolProposal —
+            // the user's "yes" becomes the equivalent of tapping Confirm
+            // on the previously-rendered card.
+            await runToolProposal(
+                query: query,
+                modePrediction: ChatModePrediction(
+                    mode: .toolAction,
+                    confidence: 0.95,
+                    reasoning: "pending-tool-confirmation: bare affirmative",
+                    runtimeMS: 0
+                ),
+                extraction: extraction,
+                containsPII: containsPII,
+                preselectedToolSelection: ToolSelection(
+                    intent: pendingConfirmation.intent,
+                    confidence: pendingConfirmation.confidence,
+                    arguments: ToolArguments(
+                        Dictionary(uniqueKeysWithValues: pendingConfirmation.arguments.map { ($0.label, $0.value) })
+                    ),
+                    reasoning: pendingConfirmation.reasoning ?? "recovered from pending confirmation",
+                    runtimeMS: 0
+                ),
+                understanding: nil
+            )
+            // Record this turn so frustration counters update.
+            conversationState.recordTurn(
+                userMessage: query,
+                assistantLane: .toolAction,
+                toolDecision: nil
+            )
+            return
+        }
+
+        if let pending = conversationState.pendingClarification,
+           let recovery = tryFulfillPendingClarification(
+               userReply: query,
+               extraction: extraction,
+               pending: pending
+           ) {
+            AppLog.intelligence.info(
+                "pending-clarification recovered: intent=\(recovery.intent.rawValue, privacy: .public) added=\(recovery.recoveredSlotKey ?? "-", privacy: .public)"
+            )
+            conversationState.clearPendingClarification()
+            routingStage = .preparingAction
+            await runToolProposal(
+                query: query,
+                modePrediction: ChatModePrediction(
+                    mode: .toolAction,
+                    confidence: 0.95,
+                    reasoning: "pending-clarification: slot recovered (\(recovery.recoveredSlotKey ?? "no slot"))",
+                    runtimeMS: 0
+                ),
+                extraction: extraction,
+                containsPII: containsPII,
+                preselectedToolSelection: ToolSelection(
+                    intent: recovery.intent,
+                    confidence: 0.95,
+                    arguments: recovery.arguments,
+                    reasoning: "Recovered slot from clarification answer.",
+                    runtimeMS: 0
+                ),
+                understanding: nil
+            )
+            // The post-turn recordTurn for runToolProposal will fire
+            // below in the tail of the dispatch path — but since we're
+            // returning early, do it explicitly here so frustration
+            // counters update on this turn too.
+            conversationState.recordTurn(
+                userMessage: query,
+                assistantLane: .toolAction,
+                toolDecision: nil
+            )
+            return
+        }
+
+        // Clarification was pending but the reply didn't fulfil it —
+        // the user changed topics. Clear and fall through.
+        if conversationState.pendingClarification != nil {
+            AppLog.intelligence.info("pending-clarification cleared (no match) — falling through to classifier")
+            conversationState.clearPendingClarification()
+        }
+
+        // ADR-022 §4.3 Layer 0 — deterministic fast-paths that skip
+        // Layer 1 entirely when the trigger is unambiguous. Only one
+        // such fast-path exists today (PersonalSummaryDetector); the
+        // ImperativeToolDetector lives INSIDE the .toolAction lane,
+        // not before it.
+        if PersonalSummaryDetector.detect(query) {
+            AppLog.intelligence.info("personal-summary fast-path matched — skipping understanding layer")
+            routingStage = .composing
+            await runPersonalizedSummary(
+                query: query,
+                modePrediction: ChatModePrediction(
+                    mode: .personalSummary,
+                    confidence: 0.95,
+                    reasoning: "deterministic personal-summary pattern match",
+                    runtimeMS: 0
+                ),
+                extraction: extraction,
+                understanding: nil
+            )
+            return
+        }
+
+        // Step 6 runtime split — normal Liquid Telco support turns now
+        // enter the composer dispatcher directly. The dispatcher owns the
+        // deep module boundary for retrieval evidence, route policy, and
+        // deterministic composition. This path intentionally bypasses
+        // QueryUnderstandingClassifier, chat-mode-router, Stage A LoRAs,
+        // and relational LoRA. Those remain available only through the
+        // legacy dispatch path below when the composer dispatcher is not
+        // wired.
+        if let dispatcher = verizonDispatcher {
+            AppLog.intelligence.info("composer runtime path: bypassing composite understanding")
+            lastUnderstanding = nil
+            routingStage = .searching
+            await runVerizonDispatch(
+                query: query,
+                modePrediction: ChatModePrediction(
+                    mode: .kbQuestion,
+                    confidence: 1.0,
+                    reasoning: "composer runtime: explicit state + retrieval evidence",
+                    runtimeMS: 0
+                ),
+                extraction: extraction,
+                containsPII: containsPII,
+                dispatcher: dispatcher,
+                understanding: nil,
+                retrievalContext: composerRetrievalContext(),
+                composerOnly: true
+            )
+            return
+        }
+
+        // ADR-022 §4.3 Layer 1 — one shared-backbone forward pass
+        // produces the full QueryUnderstanding vector (chat_mode,
+        // topic_gate, refusal_flags, emotional_state, slot_completeness).
+        // Strategy is fixed at boot: shared backbone when v2 is bundled,
+        // composite fallback today, unavailable in degraded builds.
+        //
+        // ADR-024 — pairwise relational heads run as a second pass on
+        // the same backbone (separate adapter), consuming cached prior
+        // hidden states from `ConversationState`. The classifier
+        // returns the FULL vector (single-input + relational fields).
+        // Relational fields nil when prior hidden states unavailable
+        // (first turn) or the relational adapter isn't bundled —
+        // router handles nil per ADR-022 §4.3 principle #1.
+        let understanding: QueryUnderstanding
+        do {
+            understanding = try await understandingClassifier.classify(query: query)
+        } catch {
+            AppLog.intelligence.error("understanding layer failed: \(error.localizedDescription, privacy: .public) — falling back to OOS")
             await runOutOfScope(
                 query: query,
                 modePrediction: ChatModePrediction(
                     mode: .outOfScope,
-                    confidence: 1.0,
-                    reasoning: "topic gate: \(reason)",
+                    confidence: 0.0,
+                    reasoning: "understanding inference error",
                     runtimeMS: 0
                 ),
-                extraction: extraction
+                extraction: extraction,
+                understanding: nil
             )
             return
         }
+        lastUnderstanding = understanding
 
-        if let decisionEngine {
-            let result = await decisionEngine.decide(
-                query: query,
-                kb: kb.entries,
-                extraction: extraction,
-                availableTools: toolRegistry.all
+        // ADR-024 Phase δ — Layer 1' relational pass. Runs AFTER the
+        // single-input classifier so the shared backbone adapter is
+        // already loaded (the relational adapter swap on top of it is
+        // sub-millisecond from the adapter cache). On the first turn
+        // `priorAssistantText` is nil → `.none` outcomes, zero cost.
+        //
+        // priorUserText: the user message that drove the prior assistant
+        // reply. We need it for the stance_change head input format
+        // (`[USER_PRIOR]` sentinel). Pull it from `messages` — the
+        // current message is the last one (appended before this call),
+        // so the prior user message is the second-to-last user role entry.
+        let priorUserText: String? = messages
+            .dropLast()
+            .last(where: { $0.role == .user })
+            .map { $0.text }
+
+        let relationalOutcomes: RelationalOutcomes
+        do {
+            relationalOutcomes = try await relationalStrategy.classifyFromText(
+                currentUserQuery: query,
+                priorAssistantText: conversationState.priorAssistantText,
+                priorUserText: priorUserText
             )
-            lastTelcoVector = result.vector
-            lastTelcoLane = result.lane
+        } catch {
+            // Relational pass failure must never block the main turn.
+            // Log and proceed with .none (single-turn baseline).
+            AppLog.intelligence.error(
+                "relational-pass failed: \(error.localizedDescription, privacy: .public) — falling through to single-turn baseline"
+            )
+            relationalOutcomes = .none
+        }
 
-            if let lane = result.lane,
-               await dispatchTerminalTelcoLaneIfNeeded(
-                    lane,
+        // Merge the relational outcomes into the QueryUnderstanding vector.
+        // The relational pass runs on a separate adapter so its timing
+        // adds to the Layer 1 total. If .none, the merge is a no-op.
+        let enrichedUnderstanding: QueryUnderstanding
+        if relationalOutcomes.turnRelationship != nil {
+            enrichedUnderstanding = QueryUnderstanding(
+                chatMode: understanding.chatMode,
+                topicGate: understanding.topicGate,
+                refusalFlags: understanding.refusalFlags,
+                emotionalState: understanding.emotionalState,
+                slotCompleteness: understanding.slotCompleteness,
+                turnRelationship: relationalOutcomes.turnRelationship,
+                slotAlignment: relationalOutcomes.slotAlignment,
+                stanceChange: relationalOutcomes.stanceChange,
+                totalMs: understanding.totalMs + relationalOutcomes.runtimeMs,
+                strategy: understanding.strategy
+            )
+            lastUnderstanding = enrichedUnderstanding
+            AppLog.intelligence.info(
+                "relational-pass: \(relationalOutcomes.turnRelationship?.value.wireName ?? "none", privacy: .public) conf=\(String(format: "%.2f", relationalOutcomes.turnRelationship?.confidence ?? 0), privacy: .public) \(String(format: "%.0f", relationalOutcomes.runtimeMs), privacy: .public)ms"
+            )
+        } else {
+            enrichedUnderstanding = understanding
+        }
+
+        // ADR-022 §4.3 Layer 2 + ADR-024 §4.6 — pure-function fused
+        // router. Returns a `RoutingDecision` containing both the
+        // lane AND the side-effects the workflow must perform
+        // (fire pending tool, accumulate slot, augment retrieval).
+        // When relational fields on `understanding` are nil (degraded
+        // build OR first turn), the fusion router falls through to
+        // the single-turn `decide(understanding:retrieval:)` path
+        // with `actions: []` — behaviour identical to pre-ADR-024.
+        let decision = VerizonUnderstandingRouter.decideMultiTurn(
+            understanding: enrichedUnderstanding,
+            conversation: conversationState.snapshot,
+            pendingClarification: conversationState.pendingClarification,
+            pendingToolConfirmation: conversationState.pendingToolConfirmation,
+            retrieval: nil
+        )
+        let lane = decision.lane
+        if !decision.actions.isEmpty {
+            AppLog.intelligence.info(
+                "multi-turn fusion: \(decision.reasoning, privacy: .public) actions=\(decision.actions.count, privacy: .public)"
+            )
+        }
+        AppLog.intelligence.info(
+            "understanding lane=\(lane.wireName, privacy: .public)"
+        )
+
+        // Apply each post-decision action BEFORE dispatch. Some
+        // actions short-circuit the dispatch entirely (firePendingTool)
+        // by returning from processTextQuery; others mutate
+        // conversation state in preparation for the lane handler.
+        //
+        // ADR-024 follow-up 2026-05-27 — the result now carries an
+        // optional RetrievalContext that the lane handler threads into
+        // its ColBERT call. Was a Bool short-circuit signal; now a
+        // typed envelope so `.augmentRetrievalWithPriorAssistant`
+        // actually propagates instead of just logging.
+        let postActions = await applyPostDecisionActions(
+            decision.actions,
+            query: query,
+            extraction: extraction,
+            containsPII: containsPII,
+            understanding: enrichedUnderstanding
+        )
+        if postActions.shortCircuited {
+            // A short-circuiting action handled the dispatch
+            // (e.g. fired a pending tool). Don't run the lane handler.
+            return
+        }
+
+        // ADR-022 §4.3 Layer 3 — workflow. One handler per lane;
+        // the carriers (.toolAction, .personalSummary) keep their
+        // existing ChatViewModel implementations so the migration is
+        // structural-only, not behavioural.
+        let modePrediction = enrichedUnderstanding.chatMode
+            ?? Self.modePredictionFromLane(lane)
+
+        switch lane {
+        case .verizon(let verizonLane):
+            // The dispatcher takes over for every Verizon lane. The
+            // pre-built Stage A overload tells it not to re-run the
+            // classifier (we already paid that cost in Layer 1). If
+            // Stage A wasn't available (degraded build), the dispatcher
+            // can't run — fall back to the legacy KB grounded-QA path.
+            guard let dispatcher = verizonDispatcher,
+                  let stageA = Self.stageADecisionFrom(understanding) else {
+                routingStage = .searching
+                let retrievalStart = Date()
+                let citation = await kbExtractor.extract(query: query, kb: kb.entries)
+                let retrievalMS = Int(Date().timeIntervalSince(retrievalStart) * 1000)
+                routingStage = .composing
+                await runGroundedQA(
                     query: query,
+                    citation: citation,
+                    modePrediction: modePrediction,
                     extraction: extraction,
-                    containsPII: containsPII
-               ) {
+                    containsPII: containsPII,
+                    retrievalMS: retrievalMS,
+                    understanding: enrichedUnderstanding
+                )
                 return
             }
-
-            // ADR-015 emits the rich 9-head vector, but the customer-
-            // visible branch should be owned by the model that was
-            // trained/evaluated for chat mode boundaries. This preserves
-            // the shared classifier trace while preventing a compact
-            // `routing_lane` head from overloading "why/how" questions
-            // into diagnostic tool actions.
-            let modePrediction = await chatModeRouter.classify(query: query)
-            let modelRouted = TelcoModelModeArbiter.arbitrate(
-                candidate: result.decision,
-                modePrediction: modePrediction
-            )
-
-            await dispatch(
-                modelRouted,
-                query: query,
-                extraction: extraction,
-                containsPII: containsPII
-            )
-            return
-        }
-
-        // 2) Classify mode via LFM fallback. Pure routing decision:
-        //    the model picks one of four mutually-exclusive branches.
-        let modePrediction = await chatModeRouter.classify(query: query)
-
-        // 3) Dispatch on the chat mode. KB retrieval runs only on the
-        //    question branch and is itself generative (LFM picks an
-        //    entry_id from the 32-entry KB and emits a verbatim
-        //    passage — no lexical primitive).
-        switch modePrediction.mode {
-        case .kbQuestion:
-            routingStage = .searching
-            let retrievalStart = Date()
-            let citation = await kbExtractor.extract(query: query, kb: kb.entries)
-            let retrievalMS = Int(Date().timeIntervalSince(retrievalStart) * 1000)
             routingStage = .composing
-            await runGroundedQA(
+            await runVerizonDispatch(
                 query: query,
-                citation: citation,
                 modePrediction: modePrediction,
                 extraction: extraction,
                 containsPII: containsPII,
-                retrievalMS: retrievalMS
+                dispatcher: dispatcher,
+                understanding: enrichedUnderstanding,
+                prebuiltStageA: stageA,
+                prebuiltLane: verizonLane,
+                retrievalContext: postActions.retrievalContext
             )
 
         case .toolAction:
@@ -367,7 +635,8 @@ final class ChatViewModel: ObservableObject {
                 query: query,
                 modePrediction: modePrediction,
                 extraction: extraction,
-                containsPII: containsPII
+                containsPII: containsPII,
+                understanding: enrichedUnderstanding
             )
 
         case .personalSummary:
@@ -375,165 +644,296 @@ final class ChatViewModel: ObservableObject {
             await runPersonalizedSummary(
                 query: query,
                 modePrediction: modePrediction,
-                extraction: extraction
-            )
-
-        case .outOfScope:
-            routingStage = .composing
-            await runOutOfScope(
-                query: query,
-                modePrediction: modePrediction,
-                extraction: extraction
+                extraction: extraction,
+                understanding: enrichedUnderstanding
             )
         }
     }
 
-    // MARK: - Path handlers
-
-    private func dispatchTerminalTelcoLaneIfNeeded(
-        _ lane: TelcoLaneDecision,
-        query: String,
-        extraction: ExtractionResult,
-        containsPII: Bool
-    ) async -> Bool {
+    /// Synthesise a `ChatModePrediction` from a resolved lane when
+    /// the understanding vector didn't carry one (degraded
+    /// `UnavailableStrategy` path). Keeps the downstream trace card +
+    /// routing-summary surfaces populated with a meaningful mode label.
+    private static func modePredictionFromLane(_ lane: UnderstandingLane) -> ChatModePrediction {
+        let mode: ChatMode
         switch lane {
-        case .cloudAssist:
-            routingStage = .composing
-            await runCloudAssist(
+        case .verizon(let verizonLane):
+            switch verizonLane {
+            case .greeting, .ragStepByStep, .navOnlyDeeplink,
+                 .unknownFeature, .clarification, .liveAgentEscalation:
+                mode = .kbQuestion
+            case .oosRefusal:
+                mode = .outOfScope
+            }
+        case .toolAction:       mode = .toolAction
+        case .personalSummary:  mode = .personalSummary
+        }
+        return ChatModePrediction(
+            mode: mode,
+            confidence: 0,
+            reasoning: "lane-derived (no chat_mode head signal)",
+            runtimeMS: 0
+        )
+    }
+
+    private func composerRetrievalContext() -> RetrievalContext {
+        RetrievalContext(
+            priorAssistantText: conversationState.priorAssistantText,
+            priorPageID: conversationState.priorPageID,
+            priorLinkID: conversationState.priorLinkID
+        )
+    }
+
+    private static func routingPath(
+        for result: VerizonDispatchResult,
+        fallback: RoutingPath
+    ) -> RoutingPath {
+        switch result.composerRoute {
+        case .some(.toolAction):
+            return .toolCall
+        case .some(.outOfScope), .some(.noRagAnswer):
+            return .outOfScope
+        case .some(.ragAnswer), .some(.answerPlusAction), .some(.accountNav), .some(.liveAgent),
+             .some(.clarify), .some(.greeting):
+            return .answerWithRAG
+        case .none:
+            return fallback
+        }
+    }
+
+    /// Re-shape the `QueryUnderstanding` Stage A signals into the
+    /// dispatcher's `VerizonStageADecision` so we can pre-supply it
+    /// and skip the dispatcher's own Stage A classifier call. Returns
+    /// nil when topic_gate or refusal_flags are missing (degraded
+    /// build) — the caller falls back to the legacy KB grounded-QA
+    /// path.
+    private static func stageADecisionFrom(_ understanding: QueryUnderstanding) -> VerizonStageADecision? {
+        guard let topic = understanding.topicGate,
+              let flags = understanding.refusalFlags else {
+            return nil
+        }
+        return VerizonStageADecision(
+            topicGate: topic.value,
+            topicGateConfidence: topic.confidence,
+            topicGateProbabilities: [],  // unused by the dispatcher; trace shows the v2 card instead
+            refusalFlags: flags.value,
+            refusalFlagsProbabilities: flags.probabilities.map(Float.init),
+            totalMs: understanding.totalMs
+        )
+    }
+
+    /// Verizon RAG dispatch — Stage A (probe-validated heads) →
+    /// VerizonRagRouter → branches (Stage B for ragStepByStep, templates
+    /// for the refusal / nav / live-agent lanes, KeywordKBExtractor for
+    /// the unknownFeature fallback). Subscribes to the dispatcher's
+    /// AsyncStream so the engineering-mode trace can render Stage A
+    /// outputs + lane decision + Stage B latency live as each step
+    /// completes. Appends exactly ONE ChatMessage at the end —
+    /// progressive UI re-renders happen via the @Published Verizon
+    /// state setters, not by appending then editing a placeholder.
+    private func runVerizonDispatch(
+        query: String,
+        modePrediction: ChatModePrediction,
+        extraction: ExtractionResult,
+        containsPII: Bool,
+        dispatcher: VerizonChatDispatcher,
+        understanding: QueryUnderstanding? = nil,
+        prebuiltStageA: VerizonStageADecision? = nil,
+        prebuiltLane: VerizonLane? = nil,
+        retrievalContext: RetrievalContext = .empty,
+        composerOnly: Bool = false
+    ) async {
+        // Reset trace state for this turn so a stale Stage B response
+        // from the previous turn doesn't render under this bubble while
+        // the new dispatch is still in flight.
+        lastVerizonStageA = nil
+        lastVerizonLane = nil
+        lastVerizonStageBResponse = nil
+        lastVerizonResult = nil
+
+        let dispatchStart = Date()
+        var finalResult: VerizonDispatchResult?
+        var finalErrorMessage: String?
+
+        // ADR-022 §4.3 Layer 1 → Layer 3: when caller pre-built the
+        // Stage A signal + lane (the v2 understanding path), hand them
+        // to the dispatcher so it doesn't re-run Stage A. The
+        // dispatcher's progressive trace still emits .stageAComplete
+        // and .laneSelected so the existing UI doesn't break.
+        let dispatchStream: AsyncStream<VerizonDispatchEvent> = {
+            if composerOnly {
+                return dispatcher.dispatchComposer(
+                    query: query,
+                    retrievalContext: retrievalContext
+                )
+            } else if let prebuiltStageA, let prebuiltLane {
+                return dispatcher.dispatch(
+                    query: query,
+                    prebuiltStageA: prebuiltStageA,
+                    prebuiltLane: prebuiltLane,
+                    retrievalContext: retrievalContext
+                )
+            }
+            return dispatcher.dispatch(
                 query: query,
-                lane: lane,
-                extraction: extraction,
-                containsPII: containsPII
+                retrievalContext: retrievalContext
             )
-            return true
-        case .humanEscalation, .blocked:
-            // These policy lanes are terminal for the customer-visible
-            // dispatch as well, but the demo currently renders them
-            // through the local refusal surface. Keep that behavior
-            // explicit so chat-mode cannot accidentally turn policy
-            // decisions into profile summaries.
-            routingStage = .composing
-            await runOutOfScope(
-                query: query,
-                modePrediction: ChatModePrediction(
-                    mode: .outOfScope,
-                    confidence: lastTelcoVector?.routingLane.confidence ?? 1.0,
-                    reasoning: Self.terminalLaneReason(lane),
-                    runtimeMS: 0
+        }()
+
+        for await event in dispatchStream {
+            switch event {
+            case .stageAStarted:
+                routingStage = .understanding
+            case .stageAComplete(let stageA):
+                lastVerizonStageA = stageA
+            case .laneSelected(let lane):
+                lastVerizonLane = lane
+                routingStage = lane.requiresGeneration ? .composing : .searching
+            case .retrievalStarted:
+                routingStage = .searching
+            case .retrievalComplete(let result):
+                // Latest retrieval result observable for the
+                // engineering trace (Phase 4 will render it).
+                AppLog.intelligence.info(
+                    "retrieval top=\(result.hits.first?.chunk.chunkID ?? "<none>", privacy: .public) conf=\(String(format: "%.3f", result.topConfidence), privacy: .public) gap=\(String(format: "%.3f", result.topGap), privacy: .public) elapsed=\(String(format: "%.0f", result.elapsedMs), privacy: .public)ms"
+                )
+            case .stageBStarted:
+                routingStage = .composing
+            case .stageBComplete(let response):
+                lastVerizonStageBResponse = response
+            case .faithfulnessChecked(let score):
+                AppLog.intelligence.info(
+                    "faithfulness jaccard=\(String(format: "%.3f", score.bigramJaccard), privacy: .public) floor=\(String(format: "%.2f", score.floor), privacy: .public) faithful=\(score.isFaithful, privacy: .public)"
+                )
+            case .fallbackInvoked(let reason):
+                AppLog.intelligence.info("Verizon dispatcher fallback: \(reason, privacy: .public)")
+            case .response(let result):
+                finalResult = result
+            case .failed(let message):
+                finalErrorMessage = message
+            }
+        }
+
+        let dispatchLatencyMS = Int(Date().timeIntervalSince(dispatchStart) * 1000)
+
+        if let finalResult {
+            lastVerizonResult = finalResult
+            let totalWallMS = Int((finalResult.totalMs > 0 ? finalResult.totalMs : Double(dispatchLatencyMS)).rounded())
+            let retrievalMS = finalResult.retrievalMs.map { Int($0.rounded()) }
+            let routePolicyMS = finalResult.routePolicyMs.map { Int($0.rounded()) }
+            let composerMS = finalResult.composerMs.map { Int($0.rounded()) }
+            let answerMS = composerMS ?? dispatchLatencyMS
+            let displayText = finalResult.text
+            // Citation chip — composer, Stage B, and KB fallback all
+            // produce evidence, just in different envelopes. The UI
+            // wants one KBEntry-shaped value so the source chip and
+            // article sheet stay path-agnostic.
+            let citationEntry: KBEntry?
+            if let chunk = finalResult.retrievedChunk {
+                citationEntry = Self.makeCitationEntry(from: chunk)
+            } else if let unit = finalResult.citedRAGUnit {
+                citationEntry = Self.makeCitationEntry(from: unit)
+            } else if let entry = finalResult.kbEntry {
+                citationEntry = entry
+            } else {
+                citationEntry = nil
+            }
+            let resolvedLane = lastVerizonLane.map { UnderstandingLane.verizon($0) }
+                ?? UnderstandingLane.verizon(.ragStepByStep)
+            var message = ChatMessage(
+                role: .assistant,
+                text: displayText,
+                routing: RoutingSummary(
+                    path: Self.routingPath(for: finalResult, fallback: modePrediction.mode.routingPath),
+                    toolIntent: nil,
+                    containsPII: containsPII,
+                    confidence: modePrediction.confidence
                 ),
-                extraction: extraction
+                sourceEntry: citationEntry,
+                deepLinks: finalResult.deepLink.map {
+                    [DeepLink(
+                        label: finalResult.citedRAGUnit?.displayLabel ?? "Open in app",
+                        url: $0
+                    )]
+                } ?? [],
+                latencyMS: totalWallMS,
+                trace: CallTrace(
+                    surface: .onDeviceRAG,
+                    retrievalMS: retrievalMS,
+                    inferenceMS: answerMS,
+                    topKBMatchID: finalResult.citedRAGUnit?.pageID,
+                    topKBScore: finalResult.citedRAGUnit == nil ? nil : 1.0,
+                    kbEntriesScanned: kb.entries.count,
+                    inputTokens: 0,
+                    outputTokens: lastVerizonStageBResponse?.outputTokens ?? 0,
+                    chatMode: modePrediction.mode,
+                    chatModeConfidence: modePrediction.confidence,
+                    chatModeRuntimeMS: modePrediction.runtimeMS,
+                    extraction: extraction,
+                    understanding: understanding,
+                    routePolicyMS: routePolicyMS,
+                    composerMS: composerMS,
+                    totalWallMS: totalWallMS,
+                    // Step 6.6 composer telemetry — nil on legacy
+                    // Stage B / kbFallback paths, populated on the
+                    // composer path so engineering-mode trace can
+                    // surface the route + cited page + confirmation flag.
+                    composerRoute: finalResult.composerRoute?.wireName,
+                    composerCitedPageID: finalResult.citedRAGUnit?.pageID,
+                    composerRenderedLinkID: finalResult.citedRAGUnit?.linkID,
+                    composerConfirmationShown: finalResult.requiresConfirmation
+                )
             )
-            return true
-        case .localAnswer, .localTool, .degraded:
-            return false
-        }
-    }
-
-    private func dispatch(
-        _ decision: TelcoRoutingDecision,
-        query: String,
-        extraction: ExtractionResult,
-        containsPII: Bool
-    ) async {
-        switch decision {
-        case .kbQuestion(let modePrediction, let routerCitation):
-            routingStage = .searching
-            // Source-of-truth for KB citation is the configured KB
-            // extractor wired in `AppState.buildLFMStack`. The router-
-            // provided citation is `.noMatch` by design — see
-            // `TelcoDecisionRouter.route` for the why. This call runs
-            // retrieval only after the chat-mode LFM has selected the
-            // question branch.
-            let retrievalStart = Date()
-            let citation = await kbExtractor.extract(query: query, kb: kb.entries)
-            let retrievalMS = Int(Date().timeIntervalSince(retrievalStart) * 1000)
-            _ = routerCitation
-            routingStage = .composing
-            await runGroundedQA(
+            // Compound RAG + tool — attach a "Want me to do this?" card
+            // when the Verizon lane carries content (RAG/unknown/clarification)
+            // and the user's query is an unambiguous imperative.
+            maybeAttachCompoundTool(
+                to: &message,
                 query: query,
-                citation: citation,
-                modePrediction: modePrediction,
                 extraction: extraction,
-                containsPII: containsPII,
-                retrievalMS: retrievalMS
+                lane: resolvedLane
             )
-
-        case .toolAction(let modePrediction, let selection):
-            routingStage = .preparingAction
-            await runToolProposal(
+            attachNBAIfAvailable(
+                to: &message,
                 query: query,
-                modePrediction: modePrediction,
-                extraction: extraction,
-                containsPII: containsPII,
-                preselectedToolSelection: selection.intent == nil ? nil : selection
+                understanding: understanding,
+                lane: resolvedLane,
+                toolIntent: nil
             )
-
-        case .personalSummary(let modePrediction):
-            routingStage = .composing
-            await runPersonalizedSummary(
+            messages.append(message)
+            sessionStats.recordLatency(totalWallMS)
+            recordTurnSideEffects(
                 query: query,
-                modePrediction: modePrediction,
-                extraction: extraction
+                lane: resolvedLane,
+                toolDecision: message.toolDecision,
+                pendingIntent: nil,
+                missingSlots: [],
+                assistantText: message.text,
+                // Step 5b Pre-flight Fix C iOS-integration follow-up —
+                // carry the cited RAG unit forward so the next turn's
+                // short-followup override can reuse it. Both nil when
+                // the composer produced no citation (greeting, OOS,
+                // live-agent, clarify, ambiguous-yes-ignored).
+                citedPageID: finalResult.citedRAGUnit?.pageID,
+                citedLinkID: finalResult.citedRAGUnit?.linkID
             )
-
-        case .outOfScope(let modePrediction):
-            routingStage = .composing
-            await runOutOfScope(
-                query: query,
-                modePrediction: modePrediction,
-                extraction: extraction
-            )
-        }
-    }
-
-    private func runCloudAssist(
-        query: String,
-        lane: TelcoLaneDecision,
-        extraction: ExtractionResult,
-        containsPII: Bool
-    ) async {
-        guard case .cloudAssist(let supportIntent, let requirements, let missingSlots, let piiRisk, let reason) = lane else {
             return
         }
 
-        let visibleMS = telcoClassifierRuntimeMS
-        let text = Self.cloudAssistResponse(
-            supportIntent: supportIntent,
-            requirements: requirements,
-            missingSlots: missingSlots
+        // No final result + a failure message → dispatcher errored out
+        // early. Use the existing inference-failure path so the user
+        // sees a consistent error bubble across the legacy and new
+        // routes.
+        let error = NSError(
+            domain: "VerizonChatDispatcher",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: finalErrorMessage ?? "Verizon dispatcher failed without a result"]
         )
-        let inputTokens = TokenEstimator.estimate(query)
-        let outputTokens = TokenEstimator.estimate(text)
-        let pipelineTrace = currentTelcoPipelineTrace(
-            totalLatencyMS: visibleMS,
-            answerSummary: "Cloud assist payload prepared",
-            target: "Cloud assist",
-            laneLabel: "Cloud assist (\(requirements.count) requirement\(requirements.count == 1 ? "" : "s"))",
-            laneReason: reason
+        appendInferenceFailure(
+            error: error,
+            mode: modePrediction.mode,
+            containsPII: containsPII
         )
-
-        let message = ChatMessage(
-            role: .assistant,
-            text: text,
-            routing: RoutingSummary(
-                path: .cloudAssist,
-                toolIntent: nil,
-                containsPII: containsPII || piiRisk != .safe,
-                confidence: lastTelcoVector?.routingLane.confidence
-            ),
-            latencyMS: visibleMS,
-            trace: CallTrace(
-                surface: .cloudAssist,
-                inferenceMS: visibleMS,
-                inputTokens: inputTokens,
-                outputTokens: outputTokens,
-                extraction: extraction,
-                telcoPipeline: pipelineTrace
-            )
-        )
-        tokenLedger.recordDeflection()
-        messages.append(message)
-        sessionStats.recordLatency(visibleMS)
     }
 
     private func runGroundedQA(
@@ -542,13 +942,15 @@ final class ChatViewModel: ObservableObject {
         modePrediction: ChatModePrediction,
         extraction: ExtractionResult,
         containsPII: Bool,
-        retrievalMS: Int
+        retrievalMS: Int,
+        understanding: QueryUnderstanding? = nil
     ) async {
         // Resolve the cited KB entry if the extractor returned a
         // match. A `.noMatch` citation or a hallucinated id (already
         // guarded by `LFMKBExtractor`) falls back to the synthetic
-        // "no match" stub so both the fast renderer and optional
-        // generative path have a trusted local article boundary.
+        // "no match" stub so the grounded-QA prompt still runs —
+        // the prompt tells the model to say "no matching article"
+        // when the reference doesn't fit.
         let topEntry: KBEntry
         if citation.entryId == EmbeddingKBExtractor.loadingEntryID {
             // KB embedding index is still building (cold-start window,
@@ -561,20 +963,12 @@ final class ChatViewModel: ObservableObject {
         } else {
             topEntry = fallbackEntryForEmptyKB()
         }
-        if useFastGroundedQA {
+        if useSimulatorFastGroundedQA {
             let displayText = Self.compactGroundedAnswer(topEntry.answer)
             let inputTokens = TokenEstimator.estimate(query)
             let outputTokens = TokenEstimator.estimate(displayText)
-            let visibleMS = telcoClassifierRuntimeMS + modePrediction.runtimeMS + retrievalMS
+            let visibleMS = modePrediction.runtimeMS + retrievalMS
             tokenLedger.recordOnDevice(inputTokens: inputTokens, outputTokens: outputTokens)
-            let pipelineTrace = currentTelcoPipelineTrace(
-                totalLatencyMS: visibleMS,
-                downstreamStep: Self.kbPipelineStep(citation: citation, entry: topEntry, retrievalMS: retrievalMS),
-                answerSummary: "On-device KB grounded answer",
-                target: "Local answer",
-                laneLabel: "Local answer",
-                laneReason: citation.isMatch ? "answered from on-device KB" : "no matching KB article"
-            )
 
             var message = ChatMessage(
                 role: .assistant,
@@ -601,12 +995,32 @@ final class ChatViewModel: ObservableObject {
                     chatModeConfidence: modePrediction.confidence,
                     chatModeRuntimeMS: modePrediction.runtimeMS,
                     extraction: extraction,
-                    telcoPipeline: pipelineTrace
+                    understanding: understanding
                 )
             )
-            attachNBAIfAvailable(to: &message, query: query)
+            maybeAttachCompoundTool(
+                to: &message,
+                query: query,
+                extraction: extraction,
+                lane: .verizon(.ragStepByStep)
+            )
+            attachNBAIfAvailable(
+                to: &message,
+                query: query,
+                understanding: understanding,
+                lane: .verizon(.ragStepByStep),
+                toolIntent: nil
+            )
             messages.append(message)
             sessionStats.recordLatency(visibleMS)
+            recordTurnSideEffects(
+                query: query,
+                lane: .verizon(.ragStepByStep),
+                toolDecision: message.toolDecision,
+                pendingIntent: nil,
+                missingSlots: [],
+                assistantText: message.text
+            )
             return
         }
         do {
@@ -627,20 +1041,6 @@ final class ChatViewModel: ObservableObject {
             let displayText = Self.isTerseGeneration(response.text)
                 ? Self.firstParagraph(of: topEntry.answer)
                 : response.text
-            let visibleMS = telcoClassifierRuntimeMS + modePrediction.runtimeMS + retrievalMS + response.latencyMS
-            let pipelineTrace = currentTelcoPipelineTrace(
-                totalLatencyMS: visibleMS,
-                downstreamStep: Self.groundedResponsePipelineStep(
-                    citation: citation,
-                    entry: topEntry,
-                    retrievalMS: retrievalMS,
-                    responseMS: response.latencyMS
-                ),
-                answerSummary: "On-device KB grounded answer",
-                target: "Local answer",
-                laneLabel: "Local answer",
-                laneReason: citation.isMatch ? "retrieved local KB article and composed answer" : "no matching KB article"
-            )
             var message = ChatMessage(
                 role: .assistant,
                 text: displayText,
@@ -652,7 +1052,7 @@ final class ChatViewModel: ObservableObject {
                 ),
                 sourceEntry: citation.isMatch ? topEntry : nil,
                 deepLinks: response.deepLinks,
-                latencyMS: visibleMS,
+                latencyMS: modePrediction.runtimeMS + retrievalMS + response.latencyMS,
                 trace: CallTrace(
                     surface: .onDeviceRAG,
                     retrievalMS: retrievalMS,
@@ -666,12 +1066,32 @@ final class ChatViewModel: ObservableObject {
                     chatModeConfidence: modePrediction.confidence,
                     chatModeRuntimeMS: modePrediction.runtimeMS,
                     extraction: extraction,
-                    telcoPipeline: pipelineTrace
+                    understanding: understanding
                 )
             )
-            attachNBAIfAvailable(to: &message, query: query)
+            maybeAttachCompoundTool(
+                to: &message,
+                query: query,
+                extraction: extraction,
+                lane: .verizon(.ragStepByStep)
+            )
+            attachNBAIfAvailable(
+                to: &message,
+                query: query,
+                understanding: understanding,
+                lane: .verizon(.ragStepByStep),
+                toolIntent: nil
+            )
             messages.append(message)
             sessionStats.recordLatency(message.trace?.customerVisibleMS ?? response.latencyMS)
+            recordTurnSideEffects(
+                query: query,
+                lane: .verizon(.ragStepByStep),
+                toolDecision: message.toolDecision,
+                pendingIntent: nil,
+                missingSlots: [],
+                assistantText: message.text
+            )
         } catch {
             appendInferenceFailure(error: error, mode: modePrediction.mode, containsPII: containsPII)
         }
@@ -682,14 +1102,32 @@ final class ChatViewModel: ObservableObject {
         modePrediction: ChatModePrediction,
         extraction: ExtractionResult,
         containsPII: Bool,
-        preselectedToolSelection: ToolSelection? = nil
+        preselectedToolSelection: ToolSelection? = nil,
+        understanding: QueryUnderstanding? = nil
     ) async {
         // Tool selection routes on the query alone. The generative-
         // retrieval architecture doesn't pre-fetch a KB entry for the
         // action branch, and the tool-selector prompt never used one.
+        //
+        // Fast-path: when the imperative literally names a tool ("run
+        // diagnostics", "restart my router", "pause my son's tablet"),
+        // ImperativeToolDetector returns a tool intent in O(μs) and we
+        // skip the ~1.7 s LFMToolSelector LFM call. Question forms are
+        // explicitly rejected by the detector so KB lookups aren't
+        // hijacked. Ambiguous phrasings fall through to the LFM
+        // selector for full argument extraction + confidence.
         let toolSelection: ToolSelection
         if let preselectedToolSelection {
             toolSelection = preselectedToolSelection
+        } else if let imperativeIntent = ImperativeToolDetector.detect(query) {
+            AppLog.intelligence.info("imperative tool fast-path matched: \(imperativeIntent.rawValue, privacy: .public) — skipping LFMToolSelector")
+            toolSelection = ToolSelection(
+                intent: imperativeIntent,
+                confidence: 0.95,
+                arguments: imperativeArguments(intent: imperativeIntent, extraction: extraction),
+                reasoning: "deterministic imperative pattern match",
+                runtimeMS: 0
+            )
         } else {
             toolSelection = await toolSelector.select(
                 query: query,
@@ -714,7 +1152,8 @@ final class ChatViewModel: ObservableObject {
                 modePrediction: modePrediction,
                 extraction: extraction,
                 containsPII: containsPII,
-                retrievalMS: retrievalMS
+                retrievalMS: retrievalMS,
+                understanding: understanding
             )
             return
         }
@@ -745,22 +1184,9 @@ final class ChatViewModel: ObservableObject {
 
         // Real on-device LFM time that the user waited on: ChatModeRouter
         // (classify the 4-way gate) + ToolSelector (pick tool + extract
-        // args) plus the shared ADR classifyAll pass when present. The
-        // final framing sentence is deterministic, so no third inference
-        // to add.
-        let onDeviceMS = telcoClassifierRuntimeMS + modePrediction.runtimeMS + toolSelection.runtimeMS
-        let pipelineTrace = currentTelcoPipelineTrace(
-            totalLatencyMS: onDeviceMS,
-            downstreamStep: Self.toolSelectionPipelineStep(
-                tool: tool,
-                selection: toolSelection,
-                modePrediction: modePrediction
-            ),
-            answerSummary: "On-device tool proposal",
-            target: "Local tool · \(tool.displayName)",
-            laneLabel: "Local tool · \(tool.displayName)",
-            laneReason: toolSelection.reasoning.isEmpty ? nil : toolSelection.reasoning
-        )
+        // args). Both are LFM calls with LoRA adapter swaps. The final
+        // framing sentence is deterministic, so no third inference to add.
+        let onDeviceMS = modePrediction.runtimeMS + toolSelection.runtimeMS
         var message = ChatMessage(
             role: .assistant,
             text: framingText,
@@ -789,12 +1215,67 @@ final class ChatViewModel: ObservableObject {
                 extraction: extraction,
                 toolSelectionReasoning: toolSelection.reasoning.isEmpty ? nil : toolSelection.reasoning,
                 toolSelectionConfidence: toolSelection.confidence,
-                telcoPipeline: pipelineTrace
+                understanding: understanding
             )
         )
-        attachNBAIfAvailable(to: &message, query: query)
+        attachNBAIfAvailable(
+            to: &message,
+            query: query,
+            understanding: understanding,
+            lane: .toolAction,
+            toolIntent: intent
+        )
         messages.append(message)
         sessionStats.recordLatency(onDeviceMS)
+
+        // ADR-023 Phase 2 — record turn so the missing-slot case sets
+        // `pendingClarification` for the NEXT turn (the user typing
+        // the device name back is the recovery path). When the
+        // slot_completeness head is bundled, this drives the
+        // multi-turn slot-fill flow without needing a separate state
+        // machine.
+        let missingSlots = ToolSlotRequirements.missingSlots(
+            for: intent,
+            given: understanding?.slotCompleteness?.value
+        )
+        let supportContext = Self.supportPageContext(for: intent)
+        recordTurnSideEffects(
+            query: query,
+            lane: .toolAction,
+            toolDecision: decisionPayload,
+            pendingIntent: intent,
+            missingSlots: missingSlots,
+            assistantText: message.text,
+            citedPageID: supportContext?.pageID,
+            citedLinkID: supportContext?.linkID
+        )
+    }
+
+    /// RAG page context associated with executable tools. Tool proposal
+    /// turns are not composed from `RAGUnit`, but the UI still shows a
+    /// support link and the next turn may ask "how do I do it?". Cache
+    /// the corresponding canonical page so the dispatcher can reuse it
+    /// for short/anaphoric follow-ups instead of treating the next turn
+    /// as an unrelated retrieval.
+    nonisolated static func supportPageContext(
+        for intent: ToolIntent
+    ) -> (pageID: String, linkID: String)? {
+        switch intent {
+        case .restartRouter:
+            return ("02.07", "restart-router")
+        case .runSpeedTest:
+            return ("01.02", "speed-test")
+        case .checkConnection, .runDiagnostics:
+            return ("01.01", "troubleshoot")
+        case .wpsPair:
+            return ("02.08", "equipment-wps")
+        case .toggleParentalControls:
+            return ("13.00", "home")
+        case .rebootExtender:
+            return ("02.00", "equipment")
+        case .scheduleTechnician:
+            return nil
+        }
     }
 
     private static func toolProposalFraming(tool: Tool, arguments: [String: String]) -> String {
@@ -837,131 +1318,11 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private static func cloudAssistResponse(
-        supportIntent: TelcoSupportIntent,
-        requirements: [TelcoCloudRequirement],
-        missingSlots: [TelcoSlotKind]
-    ) -> String {
-        let system = cloudAssistSystemName(for: supportIntent)
-        let needs = requirements.isEmpty
-            ? "live carrier systems"
-            : TelcoLabelDisplay.list(requirements.map(\.rawValue)).lowercased()
-        var text = "To answer that, I need \(system). I've prepared a cloud-assist handoff with only the required context: \(needs)."
-        if !missingSlots.isEmpty {
-            text += " It also needs \(missingSlots.count) missing field\(missingSlots.count == 1 ? "" : "s") before submission."
-        }
-        text += " Nothing has been sent from the app yet."
-        return text
-    }
-
-    private static func cloudAssistSystemName(for supportIntent: TelcoSupportIntent) -> String {
-        switch supportIntent {
-        case .outage:
-            return "live outage status from the carrier network"
-        case .billing:
-            return "the carrier billing system"
-        case .appointment:
-            return "the carrier appointment system"
-        case .planAccount:
-            return "live account and plan data"
-        case .troubleshooting, .deviceSetup, .equipmentReturn, .agentHandoff, .unknown:
-            return "live carrier systems"
-        }
-    }
-
-    private static func terminalLaneReason(_ lane: TelcoLaneDecision) -> String {
-        switch lane {
-        case .cloudAssist(_, _, _, _, let reason),
-             .humanEscalation(_, let reason),
-             .localAnswer(_, let reason),
-             .localTool(_, _, let reason),
-             .degraded(let reason):
-            return reason
-        case .blocked(let reason):
-            return "blocked: \(reason)"
-        }
-    }
-
-    private static func modeRoutingPipelineStep(
-        _ prediction: ChatModePrediction
-    ) -> TelcoPipelineTrace.Step {
-        TelcoPipelineTrace.Step(
-            id: "mode_routing",
-            title: "Mode Routing",
-            detail: prediction.mode.displayName,
-            modelTag: lfmStageTag(from: prediction.reasoning),
-            confidence: prediction.confidence,
-            latencyMs: Double(prediction.runtimeMS)
-        )
-    }
-
-    private static func kbPipelineStep(
-        citation: KBCitation,
-        entry: KBEntry,
-        retrievalMS: Int
-    ) -> TelcoPipelineTrace.Step {
-        TelcoPipelineTrace.Step(
-            id: "kb_retrieval",
-            title: "KB Retrieval",
-            detail: citation.isMatch ? entry.topic : "no matching KB article",
-            modelTag: "on-device knowledge base",
-            confidence: citation.isMatch ? citation.confidence : nil,
-            latencyMs: Double(retrievalMS)
-        )
-    }
-
-    private static func groundedResponsePipelineStep(
-        citation: KBCitation,
-        entry: KBEntry,
-        retrievalMS: Int,
-        responseMS: Int
-    ) -> TelcoPipelineTrace.Step {
-        TelcoPipelineTrace.Step(
-            id: "grounded_response",
-            title: "Grounded Response",
-            detail: citation.isMatch ? entry.topic : "no matching KB article",
-            modelTag: "local KB + LFM response",
-            confidence: citation.isMatch ? citation.confidence : nil,
-            latencyMs: Double(retrievalMS + responseMS)
-        )
-    }
-
-    private static func toolSelectionPipelineStep(
-        tool: Tool,
-        selection: ToolSelection,
-        modePrediction: ChatModePrediction
-    ) -> TelcoPipelineTrace.Step {
-        let selectorLatency = modePrediction.runtimeMS + selection.runtimeMS
-        let detail = selection.arguments.values.isEmpty
-            ? tool.displayName
-            : "\(tool.displayName) · \(selection.arguments.values.count) slot\(selection.arguments.values.count == 1 ? "" : "s")"
-        let tag = selection.runtimeMS == 0
-            ? "shared classifier"
-            : lfmStageTag(from: selection.reasoning)
-        return TelcoPipelineTrace.Step(
-            id: "tool_selection",
-            title: "Tool Selection",
-            detail: detail,
-            modelTag: tag,
-            confidence: selection.confidence,
-            latencyMs: Double(selectorLatency)
-        )
-    }
-
-    private static func lfmStageTag(from reasoning: String) -> String {
-        if reasoning.localizedCaseInsensitiveContains("classifier head") {
-            return "LFM classifier head"
-        }
-        if reasoning.localizedCaseInsensitiveContains("ADR-015") {
-            return "shared classifier"
-        }
-        return "LFM routing adapter"
-    }
-
     private func runPersonalizedSummary(
         query: String,
         modePrediction: ChatModePrediction,
-        extraction: ExtractionResult
+        extraction: ExtractionResult,
+        understanding: QueryUnderstanding? = nil
     ) async {
         let profile = customerContext.profile
 
@@ -983,32 +1344,16 @@ final class ChatViewModel: ObservableObject {
         // (verified via scripts/test_telco_chat_pipeline_local.py). See F8 in
         // FEATURES.yaml for the v2 plan that reintroduces LFM-generated
         // summaries once we have a summarizer adapter.
-        let text: String
-        if Self.isBillingQuery(query) {
-            text = Self.billingResponse(profile: profile)
-        } else if let homeNetworkAnswer = Self.homeNetworkFieldResponse(
-            query: query,
-            profile: profile
-        ) {
-            text = homeNetworkAnswer
-        } else {
-            text = Self.personalSummaryResponse(query: query, profile: profile)
-        }
+        let text: String =
+            Self.isBillingQuery(query)
+                ? Self.billingResponse(profile: profile)
+                : Self.personalSummaryResponse(query: query, profile: profile)
 
         // The ChatModeRouter is a real on-device LFM inference — its
         // latency is what the user actually waited on, and it's what
         // should show in the "On-device · …ms" badge. The final text
         // is composed in Swift from the profile data (see F8 for the
         // v2 summarizer that replaces the Swift-side composer).
-        let visibleMS = telcoClassifierRuntimeMS + modePrediction.runtimeMS
-        let pipelineTrace = currentTelcoPipelineTrace(
-            totalLatencyMS: visibleMS,
-            downstreamStep: Self.modeRoutingPipelineStep(modePrediction),
-            answerSummary: "On-device customer profile answer",
-            target: "Local profile",
-            laneLabel: "Personal summary",
-            laneReason: modePrediction.reasoning
-        )
         let message = ChatMessage(
             role: .assistant,
             text: text,
@@ -1018,7 +1363,7 @@ final class ChatViewModel: ObservableObject {
                 containsPII: false,
                 confidence: modePrediction.confidence
             ),
-            latencyMS: visibleMS,
+            latencyMS: modePrediction.runtimeMS,
             trace: CallTrace(
                 surface: .onDeviceRAG,
                 retrievalMS: nil,
@@ -1029,18 +1374,27 @@ final class ChatViewModel: ObservableObject {
                 chatModeConfidence: modePrediction.confidence,
                 chatModeRuntimeMS: modePrediction.runtimeMS,
                 extraction: extraction,
-                telcoPipeline: pipelineTrace
+                understanding: understanding
             )
         )
         tokenLedger.recordDeflection()
         messages.append(message)
-        sessionStats.recordLatency(visibleMS)
+        sessionStats.recordLatency(modePrediction.runtimeMS)
+        recordTurnSideEffects(
+            query: query,
+            lane: .personalSummary,
+            toolDecision: nil,
+            pendingIntent: nil,
+            missingSlots: [],
+            assistantText: message.text
+        )
     }
 
     private func runOutOfScope(
         query: String,
         modePrediction: ChatModePrediction,
-        extraction: ExtractionResult
+        extraction: ExtractionResult,
+        understanding: QueryUnderstanding? = nil
     ) async {
         // ChatModeRouter already classified this as out_of_scope with
         // high confidence. Asking the 350M base to compose a refusal
@@ -1056,15 +1410,6 @@ final class ChatViewModel: ObservableObject {
         // on — it's the on-device LFM call that decided this was
         // out-of-scope. Showing its runtime in the badge (rather than
         // 0ms) is honest about what the model did.
-        let visibleMS = telcoClassifierRuntimeMS + modePrediction.runtimeMS
-        let pipelineTrace = currentTelcoPipelineTrace(
-            totalLatencyMS: visibleMS,
-            downstreamStep: Self.modeRoutingPipelineStep(modePrediction),
-            answerSummary: "Refused locally",
-            target: "Out of scope",
-            laneLabel: "Out of scope",
-            laneReason: modePrediction.reasoning
-        )
         let message = ChatMessage(
             role: .assistant,
             text: Self.outOfScopeRefusal,
@@ -1074,7 +1419,7 @@ final class ChatViewModel: ObservableObject {
                 containsPII: false,
                 confidence: modePrediction.confidence
             ),
-            latencyMS: visibleMS,
+            latencyMS: modePrediction.runtimeMS,
             trace: CallTrace(
                 surface: .onDeviceRAG,
                 retrievalMS: nil,
@@ -1085,16 +1430,109 @@ final class ChatViewModel: ObservableObject {
                 chatModeConfidence: modePrediction.confidence,
                 chatModeRuntimeMS: modePrediction.runtimeMS,
                 extraction: extraction,
-                telcoPipeline: pipelineTrace
+                understanding: understanding
             )
         )
         messages.append(message)
-        sessionStats.recordLatency(visibleMS)
+        sessionStats.recordLatency(modePrediction.runtimeMS)
+        recordTurnSideEffects(
+            query: query,
+            lane: .verizon(.oosRefusal),
+            toolDecision: nil,
+            pendingIntent: nil,
+            missingSlots: [],
+            assistantText: message.text
+        )
     }
 
     private static let outOfScopeRefusal =
         "That's outside what I handle - I only cover home internet support. " +
         "Your question stayed on this phone; nothing was sent to the cloud."
+
+    /// Argument extraction for the ImperativeToolDetector fast-path.
+    /// When the detector returns a tool intent in O(μs), we still need
+    /// arguments (target device for parental controls, location hint
+    /// for extender reboot, etc.) — pull them from the already-computed
+    /// `ExtractionResult` rather than re-running an LFM.
+    private func imperativeArguments(
+        intent: ToolIntent,
+        extraction: ExtractionResult
+    ) -> ToolArguments {
+        switch intent {
+        case .toggleParentalControls:
+            var values: [String: String] = ["action": "pause_internet"]
+            if let target = extraction.targetDevice {
+                values["target_device"] = target
+            }
+            return ToolArguments(values)
+        case .rebootExtender:
+            var values: [String: String] = [:]
+            if let location = extraction.locationHint {
+                values["extender_name"] = location
+            }
+            return ToolArguments(values)
+        default:
+            // restartRouter / runDiagnostics / runSpeedTest /
+            // checkConnection / wpsPair / scheduleTechnician all take
+            // no required args in the iOS tool registry — the tool sheet
+            // handles any missing inputs interactively.
+            return .empty
+        }
+    }
+
+    /// Synthesize a `KBEntry`-shaped citation from a ColBERT chunk so
+    /// the existing "Read full article" chip in `ChatMessageRow` renders
+    /// for Verizon RAG bubbles. The chunk's section name becomes the
+    /// citation topic ("Network > Wi-Fi password"), its body becomes
+    /// the article text, and its canonical deep link (if present)
+    /// rides along as the in-app deep link.
+    private static func makeCitationEntry(from chunk: ColBERTChunk) -> KBEntry {
+        let section = chunk.section.isEmpty ? "Verizon Home Internet" : chunk.section
+        let category = section.components(separatedBy: " > ").first ?? "Verizon"
+        let deepLinks: [DeepLink] = chunk.deepLink.map {
+            [DeepLink(label: chunk.deepLinkLabel ?? "Open in app", url: $0)]
+        } ?? []
+        return KBEntry(
+            id: chunk.pageID,
+            topic: section,
+            aliases: [],
+            category: category,
+            answer: chunk.body,
+            deepLinks: deepLinks,
+            tags: [],
+            requiresToolExecution: false
+        )
+    }
+
+    /// Synthesize a `KBEntry`-shaped citation from the canonical
+    /// composer RAG unit. This is the current production path: the
+    /// deterministic composer renders from `RAGUnit`, while the chat UI
+    /// already knows how to display source chips and article sheets for
+    /// `KBEntry`.
+    private static func makeCitationEntry(from unit: RAGUnit) -> KBEntry {
+        let category = unit.section.isEmpty ? "Liquid Telco" : unit.section
+        let stepText: String
+        if unit.steps.isEmpty {
+            stepText = ""
+        } else {
+            stepText = unit.steps.enumerated()
+                .map { "\($0.offset + 1). \($0.element)" }
+                .joined(separator: "\n")
+        }
+        let answer = [stepText, unit.body]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n\n")
+        return KBEntry(
+            id: unit.pageID,
+            topic: unit.displayLabel,
+            aliases: unit.aliases,
+            category: category,
+            answer: answer,
+            deepLinks: [DeepLink(label: unit.displayLabel, url: unit.canonicalURL)],
+            tags: [unit.section, unit.linkID, unit.pageID].filter { !$0.isEmpty },
+            requiresToolExecution: unit.actionAffordance == "tool_action"
+        )
+    }
 
     /// True when the base model's grounded-QA generation is visibly too
     /// terse to have answered the customer meaningfully. The threshold
@@ -1153,30 +1591,6 @@ final class ChatViewModel: ObservableObject {
             options: [.caseInsensitive]
         )
     }()
-
-    /// Answers specific customer-owned network facts from `CustomerContext`.
-    /// The mode classifier is correct to treat "my SSID" as personal
-    /// account state; this resolver keeps that path precise instead of
-    /// collapsing every personal-summary query into a broad household recap.
-    static func homeNetworkFieldResponse(
-        query: String,
-        profile: CustomerProfile
-    ) -> String? {
-        switch CustomerProfileFactResolver().resolve(query) {
-        case .homeSSID:
-            let network = profile.homeNetwork
-            var sentences = [
-                "\(profile.firstName), your Wi-Fi network name (SSID) is \(network.ssid)."
-            ]
-            if let guest = network.guestSSID, !guest.isEmpty {
-                sentences.append("Your guest network is \(guest).")
-            }
-            sentences.append("Security is set to \(network.securityMode).")
-            return sentences.joined(separator: " ")
-        case nil:
-            return nil
-        }
-    }
 
     /// Deterministic household summary populated from the profile.
     /// The 350M base, given raw profile fields + "write a summary,"
@@ -1244,6 +1658,88 @@ final class ChatViewModel: ObservableObject {
         return sentences.joined(separator: " ")
     }
 
+    /// ADR-023 Phase 2 — single side-effect call after every assistant
+    /// turn. Centralises three concerns so each `run*` handler stays
+    /// declarative about WHAT it did, not WHAT to record:
+    ///
+    ///  1. Frustration counter updates (live-agent / didn't-work).
+    ///  2. `pendingClarification` set/clear based on lane + missing
+    ///     slots.
+    ///  3. `pendingToolConfirmation` set/clear based on toolDecision.
+    ///
+    /// Skipping this call breaks the multi-turn state machine — every
+    /// `run*` handler that appends an assistant message MUST call it
+    /// before returning.
+    private func recordTurnSideEffects(
+        query: String,
+        lane: UnderstandingLane,
+        toolDecision: ToolDecision?,
+        pendingIntent: ToolIntent?,
+        missingSlots: Set<Slot>,
+        assistantText: String? = nil,
+        citedPageID: String? = nil,
+        citedLinkID: String? = nil
+    ) {
+        conversationState.recordTurn(
+            userMessage: query,
+            assistantLane: lane,
+            toolDecision: toolDecision,
+            missingSlots: missingSlots,
+            pendingIntent: pendingIntent,
+            originalQuery: query
+        )
+
+        // ADR-024 §4.5 — record the resolved prior-turn context so the
+        // NEXT turn's relational router can read it. Without this call,
+        // `priorLane` + `priorIntent` stay nil and the STANCE_REVERT /
+        // NEGATIVE_CONTINUATION paths in `decideMultiTurn` never engage
+        // (silent dead code). Caught by the 2026-05-27 code review.
+        //
+        // Intent provenance: prefer the just-attached toolDecision's
+        // intent (the .toolAction lane path); fall back to the
+        // pendingIntent the workflow surfaced (clarification path);
+        // nil when neither — keeps the next-turn router strictly
+        // single-turn for non-action lanes.
+        conversationState.recordPriorTurnContext(
+            lane: lane,
+            intent: toolDecision?.intent ?? pendingIntent
+        )
+
+        // ADR-024 §4.5 — hidden-state cache for the NEXT turn's
+        // relational pass. Phase 8a ships this call-site so the
+        // contract is wired; both args are nil today because the
+        // relational adapter isn't bundled yet (the SharedBackboneStrategy
+        // doesn't extract per-turn hiddens). Phase 8d will pass through
+        // `understanding.userHidden` / `assistantHidden` once the
+        // strategy populates them. Today's no-op IS the architectural
+        // substrate — the call is the contract.
+        conversationState.cacheTurnHiddenStates(
+            user: nil,
+            assistant: nil
+        )
+
+        // ADR-024 follow-up 2026-05-27 — cache the literal assistant
+        // text for next-turn `RetrievalContext` augmentation. Distinct
+        // from the hidden-state cache above: TEXT is available
+        // immediately and feeds the retriever; HIDDENS require a
+        // forward pass we don't perform yet. Decoupling them means
+        // retrieval augmentation works today without waiting for
+        // Phase 8d.
+        conversationState.cacheTurnText(assistant: assistantText)
+
+        // Step 5b Pre-flight Fix C iOS-integration follow-up — cache
+        // the cited RAG unit's `pageID` / `linkID` so the NEXT turn's
+        // `RetrievalContext` can carry them into the dispatcher's
+        // short-followup override. Both args are nil today on every
+        // path EXCEPT the Verizon composer path, which passes
+        // `finalResult.citedRAGUnit?.pageID` / `.linkID`. Nil ON THIS
+        // turn is the explicit "no prior page" signal — greeting, OOS
+        // refusal, live-agent, clarify, and ambiguous-yes-ignored
+        // turns all clear it so the next turn doesn't anchor to a
+        // stale page.
+        conversationState.recordPriorPage(pageID: citedPageID, linkID: citedLinkID)
+    }
+
     // MARK: - Tool confirmation (invoked from ToolDecisionCard)
 
     /// Called from the Confirm button on a `ToolDecisionCard`. Runs the
@@ -1260,6 +1756,10 @@ final class ChatViewModel: ObservableObject {
 
         // Mark the proposal consumed so it stops being a tappable card.
         messages[idx].toolDecision = nil
+
+        // ADR-023 Phase 2 — the tool fired; any pending pointer is no
+        // longer valid. Clear so a future "yes" doesn't re-fire it.
+        conversationState.clearPendingToolConfirmation()
 
         Task { @MainActor in
             isProcessing = true
@@ -1285,11 +1785,7 @@ final class ChatViewModel: ObservableObject {
                         surface: .tool,
                         inferenceMS: total,
                         inputTokens: outcome.inputTokens,
-                        outputTokens: outcome.outputTokens,
-                        // Tool-execution receipt — no classifier ran for
-                        // this message, so don't carry the proposal turn's
-                        // 9-head trace into it.
-                        telcoPipeline: nil
+                        outputTokens: outcome.outputTokens
                     )
                 )
                 messages.append(message)
@@ -1310,6 +1806,9 @@ final class ChatViewModel: ObservableObject {
     func declineTool(messageID: UUID) {
         guard let idx = messages.firstIndex(where: { $0.id == messageID }) else { return }
         messages[idx].toolDecision = nil
+        // ADR-023 Phase 2 — user dismissed the proposal; clear pending
+        // so a follow-up "yes" doesn't resurrect it.
+        conversationState.clearPendingToolConfirmation()
     }
 
     // MARK: - NBA
@@ -1340,16 +1839,455 @@ final class ChatViewModel: ObservableObject {
             }
     }
 
-    private func attachNBAIfAvailable(to message: inout ChatMessage, query: String) {
-        // Intentionally a no-op. NBAs read as promotional inserts when
-        // they follow a support answer — feedback from both customer-
-        // and engineering-mode device testing. The chat surface is for
-        // support; the personalization story stays on the Plan tab's
-        // "For You" section and the Savings tab's ARPU signal card,
-        // where NBAs have their own framing and don't interrupt a
-        // support flow. Keep the call site so it's obvious a future
-        // design decision could re-enable, but don't attach anything.
-        _ = (message, query)
+    /// ADR-022 compound-response review (2026-05-26) — when the primary
+    /// lane produces a how-to or fallback response AND the user's query
+    /// is an unambiguous imperative ("pause my son's tablet"), attach
+    /// a SECONDARY ToolDecision card to the same message. RAG remains
+    /// the primary content; the tool card is a one-tap shortcut beneath
+    /// it. The user gets transparency (the article) + action (the card)
+    /// in the same turn — neither is hidden behind the other.
+    ///
+    /// **Policy matrix** (see ADR-022 compound-response review):
+    ///   .verizon(.ragStepByStep)        → ATTACH (the regression case)
+    ///   .verizon(.unknownFeature)       → ATTACH (KB miss but user named a tool)
+    ///   .verizon(.clarification)        → ATTACH (retrieval ambiguous but verb clear)
+    ///   .verizon(.oosRefusal)           → SUPPRESS (refusal + tool = contradictory)
+    ///   .verizon(.liveAgentEscalation)  → SUPPRESS (don't muddy escape hatch)
+    ///   .verizon(.navOnlyDeeplink)      → SUPPRESS (intentional app handoff)
+    ///   .verizon(.greeting)             → SUPPRESS (detector won't fire anyway)
+    ///   .toolAction                     → SUPPRESS (already a tool flow)
+    ///   .personalSummary                → SUPPRESS (off-topic)
+    ///
+    /// Question forms ("how do I…") are rejected by ImperativeToolDetector
+    /// itself, so they never reach this attach logic.
+    private func maybeAttachCompoundTool(
+        to message: inout ChatMessage,
+        query: String,
+        extraction: ExtractionResult,
+        lane: UnderstandingLane
+    ) {
+        // Already a tool flow — don't double-attach.
+        if message.toolDecision != nil { return }
+
+        // Policy gate — only certain lanes get the compound affordance.
+        guard Self.laneAllowsCompoundTool(lane) else { return }
+
+        // Deterministic μs lookup. Returns nil for question forms,
+        // ambiguous phrasings, and any non-imperative surface.
+        guard let intent = ImperativeToolDetector.detect(query) else { return }
+        guard let tool = toolRegistry.tool(for: intent) else { return }
+
+        let arguments = imperativeArguments(intent: intent, extraction: extraction)
+        let decision = ToolDecision(
+            intent: intent,
+            toolID: tool.id,
+            displayName: tool.displayName,
+            icon: tool.icon,
+            description: tool.description,
+            arguments: Self.formatArguments(arguments),
+            confidence: 0.95,
+            reasoning: "Deterministic imperative pattern — compound affordance.",
+            requiresConfirmation: tool.requiresConfirmation,
+            isDestructive: tool.isDestructive,
+            isCompoundAttachment: true
+        )
+        message.toolDecision = decision
+        AppLog.intelligence.info(
+            "compound tool attached lane=\(lane.wireName, privacy: .public) intent=\(intent.rawValue, privacy: .public)"
+        )
+    }
+
+    /// ADR-024 — apply the side-effects the multi-turn fusion router
+    /// emitted. Returns `true` when one of the actions handled dispatch
+    /// (fired a pending tool); the caller then skips its own lane
+    /// handler. Returns `false` when no short-circuit fired; the caller
+    /// proceeds with normal lane dispatch.
+    ///
+    /// **Order matters**: short-circuiting actions (firePendingTool)
+    /// MUST fire first so the user sees the action before the rest of
+    /// the lane handler runs. Non-short-circuiting actions
+    /// (counter mutations, slot accumulation) run in the order
+    /// emitted by the router — each is idempotent.
+    private func applyPostDecisionActions(
+        _ actions: [PostDecisionAction],
+        query: String,
+        extraction: ExtractionResult,
+        containsPII: Bool,
+        understanding: QueryUnderstanding
+    ) async -> PostActionResult {
+        // Accumulator for the retrieval-augmentation signal — populated
+        // when `.augmentRetrievalWithPriorAssistant` fires AND
+        // ConversationState has a prior assistant message. Returned
+        // to processTextQuery so the lane handler's ColBERT call
+        // actually receives the augmented context (ADR-024 follow-up
+        // 2026-05-27 — the missing primitive that turned this from a
+        // log statement into a real cross-turn signal).
+        //
+        // Step 5b Pre-flight Fix C iOS-integration follow-up — seed
+        // `priorPageID` / `priorLinkID` on EVERY turn (independent of
+        // router actions) when the prior turn cited a RAG unit. The
+        // dispatcher's short-followup override only USES these when
+        // `isShortFollowup(query)` is true, so seeding them
+        // unconditionally is safe; gating them behind a router action
+        // would silently drop short-followup reuse on most turns and
+        // break the Step 5b acceptance gates.
+        var retrievalContext: RetrievalContext = RetrievalContext(
+            priorAssistantText: nil,
+            priorPageID: conversationState.priorPageID,
+            priorLinkID: conversationState.priorLinkID
+        )
+
+        for action in actions {
+            switch action {
+            case .firePendingTool(let tool):
+                // The user said "yes/ok/go ahead" on a pending tool.
+                // Equivalent to tapping the Confirm button on the
+                // previously-rendered card. Route through runToolProposal
+                // so the trace + framing are consistent with a fresh
+                // tool action.
+                //
+                // **Short-circuit (CRITICAL fix 2026-05-27)**: this
+                // action terminates the dispatch — we return `true`
+                // immediately so subsequent actions in the array
+                // don't run (no double-clear, no accidental
+                // side-effects from a future action emitted after a
+                // fire). Pending-state cleanup is done explicitly
+                // here BEFORE the runToolProposal call.
+                AppLog.intelligence.info(
+                    "post-decision: firePendingTool \(tool.toolID, privacy: .public)"
+                )
+                conversationState.clearPendingToolConfirmation()
+                conversationState.clearPendingClarification()
+                await runToolProposal(
+                    query: query,
+                    modePrediction: ChatModePrediction(
+                        mode: .toolAction,
+                        confidence: 0.95,
+                        reasoning: "AFFIRMATIVE_CONTINUATION on pending tool",
+                        runtimeMS: 0
+                    ),
+                    extraction: extraction,
+                    containsPII: containsPII,
+                    preselectedToolSelection: ToolSelection(
+                        intent: tool.intent,
+                        confidence: tool.confidence,
+                        arguments: ToolArguments(
+                            Dictionary(uniqueKeysWithValues: tool.arguments.map { ($0.label, $0.value) })
+                        ),
+                        reasoning: tool.reasoning ?? "Recovered from pending confirmation.",
+                        runtimeMS: 0
+                    ),
+                    understanding: understanding
+                )
+                return .shortCircuit
+
+            case .clearPendingToolConfirmation:
+                conversationState.clearPendingToolConfirmation()
+
+            case .clearPendingClarification:
+                conversationState.clearPendingClarification()
+
+            case .accumulateSlotsFromAlignment(let intent, let slots):
+                // The slot_alignment head says the user's reply fills
+                // one or more missing slots. Lift the value(s) — best
+                // effort using the existing ExtractionResult, fall
+                // back to the trimmed reply itself. Slot-key mapping
+                // lives on ToolIntent so a new intent forces compiler
+                // exhaustiveness review.
+                for slot in slots {
+                    let value = Self.valueForSlot(
+                        slot,
+                        from: extraction,
+                        rawReply: query
+                    )
+                    if let value {
+                        conversationState.accumulateSlot(
+                            intent: intent,
+                            key: intent.argumentKey(for: slot),
+                            value: value
+                        )
+                    }
+                }
+
+            case .clearSlotStore(let intent):
+                conversationState.clearSlotStore(for: intent)
+
+            case .traceNegativeContinuation:
+                // Renamed from `incrementDidntWorkCounter` (2026-05-27)
+                // to make the no-op semantics explicit. The actual
+                // counter increment happens via
+                // ConversationStateRecorder.isDidntWorkContinuation
+                // inside recordTurn — same path as before ADR-024.
+                // This case exists ONLY for the trace + reasoning
+                // string so engineering can see the router's
+                // classification. Do not add a mutation here without
+                // also removing the regex match in recordTurn.
+                break
+
+            case .traceAffirmativeContinuation:
+                // Renamed from `decrementFrustrationCounters` (2026-05-27).
+                // Counters are append-only; positive signal currently
+                // has no decrement path. If we add a per-session
+                // "affirmative_count" field in the future, surface it
+                // through ConversationState mutators — not here.
+                break
+
+            case .augmentRetrievalWithPriorAssistant:
+                // ADR-024 follow-up 2026-05-27 — was a log statement.
+                // Now actually plumbs the prior assistant text into the
+                // lane handler's ColBERT retrieval call via the typed
+                // `RetrievalContext` returned to processTextQuery.
+                //
+                // Source: `ConversationState.priorAssistantText`,
+                // populated by `recordTurnSideEffects` at the end of
+                // each turn. Nil when the prior turn produced an empty
+                // reply OR when this is the first turn — the action
+                // becomes a clean no-op in those cases (no spurious
+                // augmentation with an empty string).
+                //
+                // Step 5b Pre-flight Fix C iOS wiring: also thread the
+                // prior turn's cited `pageID` / `linkID` so the
+                // dispatcher's short-followup override can force-reuse
+                // it when the new query is a bare wh-word / anaphoric
+                // pronoun / slot-prefix fragment. All three signals
+                // ride on the same `RetrievalContext` value.
+                let priorText = conversationState.priorAssistantText
+                let priorPageID = conversationState.priorPageID
+                let priorLinkID = conversationState.priorLinkID
+                let hasText = priorText.map { !$0.isEmpty } ?? false
+                if hasText || priorPageID != nil {
+                    retrievalContext = RetrievalContext(
+                        priorAssistantText: hasText ? priorText : nil,
+                        priorPageID: priorPageID,
+                        priorLinkID: priorLinkID
+                    )
+                    AppLog.intelligence.info(
+                        "post-decision: retrieval augmented (text=\(priorText?.count ?? 0, privacy: .public)c pageID=\(priorPageID ?? "<none>", privacy: .public) linkID=\(priorLinkID ?? "<none>", privacy: .public))"
+                    )
+                } else {
+                    AppLog.intelligence.info(
+                        "post-decision: retrieval augment requested but no prior assistant text or page — no-op"
+                    )
+                }
+
+            case .suppressIntentRepeat:
+                // The negative-continuation path. The repeat
+                // suppression is enforced by re-using priorLane
+                // (already done in the router) — this action is the
+                // trace marker.
+                break
+            }
+        }
+
+        return PostActionResult(
+            shortCircuited: false,
+            retrievalContext: retrievalContext
+        )
+    }
+
+    /// Best-effort value extraction for a missing slot, biased toward
+    /// the existing structured extraction and falling back to the raw
+    /// reply for bare-noun answers like "kitchen tablet".
+    private static func valueForSlot(
+        _ slot: Slot,
+        from extraction: ExtractionResult,
+        rawReply: String
+    ) -> String? {
+        switch slot {
+        case .device:
+            return extraction.targetDevice ?? bareNounAsSlotValue(rawReply)
+        case .location:
+            return extraction.locationHint ?? bareNounAsSlotValue(rawReply)
+        case .time:
+            return extraction.requestedTime
+        case .accountRef:
+            return nil  // no tool currently fires on account_ref alone
+        }
+    }
+
+    /// ADR-023 Phase 2 — output of a successful clarification recovery.
+    /// Carries the intent we're re-firing + the merged argument set
+    /// (the previously-extracted args from the original imperative
+    /// PLUS the slot we just lifted from the answer).
+    struct ClarificationRecovery {
+        let intent: ToolIntent
+        let arguments: ToolArguments
+        /// Which slot key in `arguments` was filled from the answer.
+        /// `nil` when the recovery was a no-slot-needed re-fire (e.g.,
+        /// disambiguating between two intents with no slot at all).
+        let recoveredSlotKey: String?
+    }
+
+    /// ADR-023 Phase 2 — pre-classifier recovery of a pending
+    /// clarification. Given the user's reply + the pending question
+    /// context, attempt to fill the missing slot and return a
+    /// `ClarificationRecovery` ready for `runToolProposal`. Returns
+    /// nil when the reply doesn't match the pending intent's slots
+    /// (the user changed topics).
+    ///
+    /// **Recovery rules** (pure-function over the inputs):
+    ///  1. If the user typed a bare "yes" / "ok" and the pending
+    ///     clarification didn't have a missing slot (e.g. a
+    ///     `.ragClarification` source with no concrete intent), fall
+    ///     through — no slot to fill.
+    ///  2. If the user's reply, run through `RegexQueryExtractor`,
+    ///     lifts a value into one of the missing slot kinds (.device
+    ///     → target_device, .location → extender_name), merge it into
+    ///     the original extraction and emit a recovery.
+    ///  3. Otherwise nil — the caller falls through to normal
+    ///     classification.
+    func tryFulfillPendingClarification(
+        userReply: String,
+        extraction: ExtractionResult,
+        pending: PendingClarification
+    ) -> ClarificationRecovery? {
+        // Pending clarification must have an intent for a tool re-fire.
+        // `.ragClarification` with no intent isn't recoverable through
+        // this path — the user must restate or pick.
+        guard let intent = pending.intent else { return nil }
+        guard !pending.missingSlots.isEmpty else { return nil }
+
+        // Run the extractor over the user's REPLY in isolation so we
+        // don't double-extract from the original query. Each missing
+        // slot maps to one extraction field.
+        let replyExtraction = queryExtractor.extract(from: userReply)
+        var args = imperativeArguments(intent: intent, extraction: extraction).values
+        var recoveredSlotKey: String?
+
+        for slot in pending.missingSlots {
+            switch slot {
+            case .device:
+                // Parental controls: target_device. The reply might
+                // be a bare noun ("kitchen tablet") that the
+                // RegexQueryExtractor's targetDevice patterns won't
+                // catch (they expect "pause X for Y" framing). Fall
+                // back to using the trimmed reply as the value when
+                // the extractor's patterns don't match.
+                let target = replyExtraction.targetDevice
+                    ?? Self.bareNounAsSlotValue(userReply)
+                if let target {
+                    args["target_device"] = target
+                    recoveredSlotKey = "target_device"
+                }
+            case .location:
+                // Extender reboot: extender_name. Same fallback —
+                // "upstairs" answered to "which extender?" is a bare
+                // location.
+                let location = replyExtraction.locationHint
+                    ?? Self.bareNounAsSlotValue(userReply)
+                if let location {
+                    args["extender_name"] = location
+                    recoveredSlotKey = "extender_name"
+                }
+            case .time:
+                // No tool currently requires .time as a missing-slot
+                // clarification (set-downtime is a future-scope tool).
+                // Leave the slot empty — the tool's sheet UI handles
+                // it interactively.
+                continue
+            case .accountRef:
+                // Account references don't drive tool firing — the
+                // affected tools all operate on the customer's
+                // primary account implicitly.
+                continue
+            }
+        }
+
+        // We must have actually filled SOMETHING for this to be a
+        // recovery. If the reply was a non-noun ("uhh", "?", "what?")
+        // we get nothing and bail.
+        guard recoveredSlotKey != nil else { return nil }
+
+        return ClarificationRecovery(
+            intent: intent,
+            arguments: ToolArguments(args),
+            recoveredSlotKey: recoveredSlotKey
+        )
+    }
+
+    /// Treat a short bare-noun reply as a slot value. Conservative:
+    /// rejects question forms ("which one?"), greetings, single-word
+    /// affirmatives, and very long replies (likely a topic change).
+    /// Tuned for the canonical clarification answers from the Verizon
+    /// corpus: "kitchen tablet", "Sub account", "WiFi extends".
+    private static func bareNounAsSlotValue(_ reply: String) -> String? {
+        let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        // Reject affirmatives ("yes"/"ok") — those are the
+        // pendingToolConfirmation path, not slot fill.
+        if ConversationStateRecorder.isBareAffirmative(trimmed) { return nil }
+        // Reject question forms.
+        if trimmed.hasSuffix("?") { return nil }
+        if trimmed.lowercased().hasPrefix("how ") { return nil }
+        if trimmed.lowercased().hasPrefix("what ") { return nil }
+        if trimmed.lowercased().hasPrefix("where ") { return nil }
+        if trimmed.lowercased().hasPrefix("why ") { return nil }
+        // Reject likely-topic-change long replies.
+        let wordCount = trimmed.split(whereSeparator: { $0.isWhitespace }).count
+        guard wordCount >= 1 && wordCount <= 6 else { return nil }
+        // Strip a leading "the"/"my" so "the kitchen tablet" → "kitchen tablet".
+        let stripped = trimmed.replacingOccurrences(
+            of: #"^(?i)(?:the|my)\s+"#,
+            with: "",
+            options: .regularExpression
+        )
+        return stripped.isEmpty ? nil : stripped
+    }
+
+    /// Pure-function policy gate from the compound-response review.
+    /// `nonisolated` so tests can call it off the main actor without
+    /// hops — the policy is data-free, no actor-bound state to guard.
+    nonisolated static func laneAllowsCompoundTool(_ lane: UnderstandingLane) -> Bool {
+        switch lane {
+        case .verizon(.ragStepByStep),
+             .verizon(.unknownFeature),
+             .verizon(.clarification):
+            return true
+        case .verizon(.oosRefusal),
+             .verizon(.liveAgentEscalation),
+             .verizon(.navOnlyDeeplink),
+             .verizon(.greeting),
+             .toolAction,
+             .personalSummary:
+            return false
+        }
+    }
+
+    private func attachNBAIfAvailable(
+        to message: inout ChatMessage,
+        query: String,
+        understanding: QueryUnderstanding? = nil,
+        lane: UnderstandingLane? = nil,
+        toolIntent: ToolIntent? = nil
+    ) {
+        // Promotional NBAs (upsell / retention / plan-fit) stay on the
+        // Plan tab — feedback from device testing was that they read
+        // as ads when interleaved with support answers. We keep the
+        // call site so the engineering trace can still show what would
+        // have fired.
+        //
+        // ADR-022 §4.3 Layer 4 — understanding-aware NBAs are
+        // different. They're contextual support affordances (escalate
+        // when frustrated, clarify when slots missing) that DO belong
+        // beneath the support answer. When `understanding` is present
+        // and a v2 NBA matches, attach it.
+        //
+        // ADR-023 Phase 2 — `conversationState` is passed so the
+        // EscalateOnFrustrationNBA can fire on accumulated friction
+        // counters even when the trained `emotional_state` head is
+        // silent or nil (composite / unavailable strategies).
+        guard let understanding, let lane else {
+            _ = query
+            return
+        }
+        if let nba = nbaEngine.bestMatchForUnderstanding(
+            understanding,
+            lane: lane,
+            toolIntent: toolIntent,
+            conversation: conversationState.snapshot
+        ) {
+            message.attachedNBAID = nba.id
+        }
     }
 
     /// Produces a synthetic "no KB entry" stub so the LFM grounded-QA

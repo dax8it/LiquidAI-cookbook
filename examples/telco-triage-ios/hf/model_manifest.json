@@ -1,0 +1,41 @@
+{
+  "pack_id": "telco-triage-ios-current-runtime",
+  "pack_version": "0.1.0",
+  "runtime_architecture": "zero_generation_composer_rag",
+  "ios_example_path": "examples/telco-triage-ios",
+  "required_models": [
+    {
+      "filename": "lfm25-350m-base-Q4_K_M.gguf",
+      "role": "LFM2.5-350M base model for optional model-backed app features and explicit tool support",
+      "required_by_bootstrap": true,
+      "normal_qa_path": false
+    },
+    {
+      "filename": "telco-tool-selector-v3.gguf",
+      "role": "Tool-support adapter used only when explicit tool paths need model assistance",
+      "required_by_bootstrap": true,
+      "normal_qa_path": false
+    }
+  ],
+  "required_resources": [
+    {
+      "filename": "rag-units-v1.json",
+      "role": "Canonical RAG corpus consumed by BM25HierarchyRetriever and DeterministicAnswerComposer"
+    },
+    {
+      "filename": "page-link-table-v1.json",
+      "role": "Canonical source-chip and in-app destination links"
+    },
+    {
+      "filename": "knowledge-base.json",
+      "role": "Small sample KB retained for non-composer demo surfaces"
+    }
+  ],
+  "online_qa_runtime": {
+    "model_forwards": 0,
+    "generation_calls": 0,
+    "retriever": "BM25HierarchyRetriever",
+    "answer_layer": "DeterministicAnswerComposer",
+    "citation_source": "RAGUnit.canonicalURL"
+  }
+}

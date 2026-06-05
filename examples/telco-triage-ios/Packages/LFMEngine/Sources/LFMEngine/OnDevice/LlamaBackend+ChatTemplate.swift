@@ -188,7 +188,8 @@ extension LlamaBackend {
         temperature: Float = 0.0,
         stopSequences: [String] = [],
         clearCache: Bool = true,
-        outputMode: GenerationParams.OutputMode = .text
+        outputMode: GenerationParams.OutputMode = .text,
+        grammar: String? = nil
     ) throws -> (text: String, tokenCount: Int, timing: GenerationTiming) {
         let prompt = try applyChatTemplate(messages, addAssistantMarker: true)
         return try generate(
@@ -197,7 +198,8 @@ extension LlamaBackend {
             temperature: temperature,
             stopSequences: stopSequences,
             clearCache: clearCache,
-            outputMode: outputMode
+            outputMode: outputMode,
+            grammar: grammar
         )
     }
 }

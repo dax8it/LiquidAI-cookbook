@@ -30,10 +30,11 @@ struct RootView: View {
                 .tag(CustomerTab.plan)
 
             PacksView()
-                .tabItem { Label("Packs", systemImage: "square.stack.3d.up") }
+                .tabItem { Label("Add-ons", systemImage: "square.stack.3d.up") }
                 .tag(CustomerTab.packs)
         }
         .tint(appState.brands.selected.primary)
+        .preferredColorScheme(appState.brands.selected.id == "telco-triage" ? .light : nil)
     }
 
     private var householdBadge: String? {

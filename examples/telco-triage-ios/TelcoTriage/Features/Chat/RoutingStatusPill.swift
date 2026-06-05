@@ -31,6 +31,8 @@ struct RoutingStatusPill: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(brand.surfaceElevated, in: Capsule())
+        .overlay(Capsule().stroke(brand.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.035), radius: 8, y: 3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
         .onAppear { isPulsing = true }
@@ -48,9 +50,9 @@ public enum RoutingStage: String, Sendable {
     var displayText: String {
         switch self {
         case .understanding:   return "Understanding..."
-        case .searching:       return "Searching knowledge base..."
+        case .searching:       return "Finding the right guide..."
         case .preparingAction: return "Preparing action..."
-        case .composing:       return "Composing response..."
+        case .composing:       return "Writing answer..."
         }
     }
 }

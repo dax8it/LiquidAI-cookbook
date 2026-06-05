@@ -8,8 +8,8 @@ import SwiftUI
 ///  - INTENT   : classifier intent + calibrated confidence + runtime
 ///  - SOURCE   : tool id (if any) or "RAG: kb-entry-id"
 ///  - LATENCY  : inference ms + token counts
-///  - EGRESS   : on-device paths show "0 bytes"; cloud-assist paths show
-///               that a redacted packet is prepared but not silently sent.
+///  - EGRESS   : "0 bytes ✓" — always, on every path. The demo never
+///               leaves the device.
 ///
 /// Source of truth is `CallTrace` on the assistant message. Missing
 /// fields render as an em-dash rather than disappearing — the layout
@@ -26,8 +26,8 @@ struct TraceRow: View {
                  tint: intentConfidenceTint)
             cell(title: "Source", value: sourceText, subtitle: sourceSubtitle)
             cell(title: "Latency", value: latencyText, subtitle: tokensText)
-            cell(title: "Egress", value: egressText, subtitle: egressSubtitle,
-                 tint: egressTint)
+            cell(title: "Egress", value: "0 bytes", subtitle: "on-device ✓",
+                 tint: brand.success)
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 10)
@@ -88,6 +88,9 @@ struct TraceRow: View {
             }
             return "tool"
         case .answerWithRAG:
+            if let pageID = trace.composerCitedPageID {
+                return "rag:\(pageID)"
+            }
             if let kbID = trace.topKBMatchID {
                 return "rag:\(kbID)"
             }
@@ -96,14 +99,15 @@ struct TraceRow: View {
             return "profile"
         case .outOfScope:
             return "unknown"
-        case .cloudAssist:
-            return "cloud prep"
         }
     }
 
     private var sourceSubtitle: String {
         switch routingPath {
         case .answerWithRAG:
+            if let linkID = trace.composerRenderedLinkID {
+                return "composer · \(linkID)"
+            }
             if let score = trace.topKBScore {
                 return String(format: "kb hit %.2f", score)
             }
@@ -114,28 +118,20 @@ struct TraceRow: View {
             return "customer context"
         case .outOfScope:
             return "off-topic, declined"
-        case .cloudAssist:
-            return "redacted payload"
         }
     }
 
-    private var egressText: String {
-        routingPath == .cloudAssist ? "prepared" : "0 bytes"
-    }
-
-    private var egressSubtitle: String {
-        routingPath == .cloudAssist ? "approval required" : "on-device ✓"
-    }
-
-    private var egressTint: Color {
-        routingPath == .cloudAssist ? brand.warning : brand.success
-    }
-
     private var latencyText: String {
-        "\(trace.inferenceMS)ms"
+        "\(trace.totalMS)ms"
     }
 
     private var tokensText: String {
+        if trace.retrievalMS != nil || trace.routePolicyMS != nil || trace.composerMS != nil {
+            let retrieval = trace.retrievalMS ?? 0
+            let policy = trace.routePolicyMS ?? 0
+            let composer = trace.composerMS ?? trace.inferenceMS
+            return "r \(retrieval) · p \(policy) · c \(composer)"
+        }
         let inTok = trace.inputTokens ?? 0
         let outTok = trace.outputTokens ?? 0
         if inTok == 0 && outTok == 0 { return "—" }

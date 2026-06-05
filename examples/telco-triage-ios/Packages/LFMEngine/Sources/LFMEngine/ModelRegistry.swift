@@ -130,11 +130,12 @@ public actor ModelRegistry {
             guard let downloadURL = model.resolvedDownloadURL(base: downloadBaseURL) else {
                 throw LFMEngineError.noDownloadURL
             }
+            let completedBytesBeforeModel = downloadedBytes
             let localPath = try await manager.downloadModel(
                 from: downloadURL,
                 fileName: model.fileName
-            ) { [weak self] dlProgress in
-                let currentTotal = downloadedBytes + dlProgress.bytesDownloaded
+            ) { [weak self, completedBytesBeforeModel] dlProgress in
+                let currentTotal = completedBytesBeforeModel + dlProgress.bytesDownloaded
                 let fraction = totalBytes > 0 ? Double(currentTotal) / Double(totalBytes) : 0
                 Task { await self?.updateProgress(packID: packID, fraction: fraction) }
                 progress(fraction)
