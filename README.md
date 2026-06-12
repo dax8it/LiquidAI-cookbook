@@ -171,6 +171,7 @@ Recorded sessions (~60 minutes) covering advanced topics and hands-on implementa
 | 2026-01-22 | Local video-captioning with LFM2.5-VL-1.6B and WebGPU | [Video](https://www.youtube.com/watch?v=xsWARHFoA3E) |
 | 2026-03-05 | Build your own local AI coding assistant | [Video](https://www.youtube.com/watch?v=6JEm1IxcxEw) |
 | 2026-04-22 | Let's build a wildfire detection system with a Vision Language Model and satellite images | [Video](https://www.youtube.com/watch?v=LOIDYl5fdb8) |
+| 2026-06-12 | Building on-device voice agents | [Video](https://www.youtube.com/watch?v=0YQquPG-9R8) |
 
 Join the next session! Head to the `#live-events` channel on [Discord](https://discord.com/invite/liquid-ai).
 
